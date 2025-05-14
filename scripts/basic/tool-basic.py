@@ -7,7 +7,7 @@ load_dotenv()
 client = anthropic.Anthropic()
 
 messages = [
-    {"role": "user", "content": "What's the weather like in San Francisco?"}
+    {"role": "user", "content": "What's the weather like in San Francisco? 섭씨로 답해줘"}
 ]
 
 
