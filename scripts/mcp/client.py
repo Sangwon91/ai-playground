@@ -15,6 +15,7 @@ from rich import print as rich_print
 load_dotenv()  # load environment variables from .env
 
 console = Console()
+MODEL_NAME = "claude-3-5-sonnet-latest"  # 모델명을 글로벌 변수로 정의
 
 class MCPClient:
     def __init__(self):
@@ -54,13 +55,14 @@ class MCPClient:
         
         # List available tools
         response = await self.session.list_tools()
+        console.print(response)
         tools = response.tools
         tool_names = [tool.name for tool in tools]
         console.print("\n[bold green]Connected to server with tools:[/bold green]", style="bold")
         for tool in tool_names:
             console.print(f"  • [cyan]{tool}[/cyan]")
 
-    async def process_query(self, query: str) -> str:
+    async def process_query(self, query: str, prev_messages: list[dict] | None = None) -> str:
         """Process a query using Claude and available tools"""
         messages = [
             {
@@ -68,6 +70,9 @@ class MCPClient:
                 "content": query
             }
         ]
+
+        if prev_messages:
+            messages = prev_messages + messages
 
         response = await self.session.list_tools()
         available_tools = [{ 
@@ -79,7 +84,7 @@ class MCPClient:
         # Initial Claude API call
         console.log("Sending query to Claude...")
         response = self.anthropic.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model=MODEL_NAME,
             max_tokens=1000,
             messages=messages,
             tools=available_tools
@@ -101,6 +106,9 @@ class MCPClient:
                 result = await self.session.call_tool(tool_name, tool_args)
                 tool_results.append({"call": tool_name, "result": result})
                 final_text.append(f"[Calling tool {tool_name} with args {tool_args}]")
+                
+                # Log tool output
+                console.log(f"Tool output: [bold green]{result.content}[/bold green]")
 
                 # Continue conversation with tool results
                 if hasattr(content, 'text') and content.text:
@@ -116,14 +124,14 @@ class MCPClient:
                 # Get next response from Claude
                 console.log("Getting follow-up response from Claude...")
                 response = self.anthropic.messages.create(
-                    model="claude-3-5-sonnet-20241022",
+                    model=MODEL_NAME,
                     max_tokens=1000,
                     messages=messages,
                 )
 
                 final_text.append(response.content[0].text)
 
-        return "\n".join(final_text)
+        return "\n".join(final_text), messages
 
     async def chat_loop(self):
         """Run an interactive chat loop"""
@@ -132,6 +140,7 @@ class MCPClient:
             border_style="green"
         ))
         
+        messages = []
         while True:
             try:
                 query = console.input("\n[bold yellow]Query:[/bold yellow] ").strip()
@@ -141,7 +150,9 @@ class MCPClient:
                     break
                     
                 with console.status("[bold green]Processing query...[/bold green]"):
-                    response = await self.process_query(query)
+                    response, messages = await self.process_query(
+                        query, prev_messages=messages
+                    )
                 
                 console.print(Panel(
                     Text(response, style="cyan"),
