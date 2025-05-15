@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
-from rich import print as rich_print
 
 load_dotenv()  # load environment variables from .env
 
