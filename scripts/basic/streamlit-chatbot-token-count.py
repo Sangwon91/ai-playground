@@ -7,15 +7,56 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Configuration & Constants ---
-DEFAULT_MODEL = "claude-3-5-sonnet-20240620" # More standard default model
+DEFAULT_MODEL = "claude-3-5-sonnet-20240620"
 MODEL_NAME = os.getenv("ANTHROPIC_MODEL", DEFAULT_MODEL)
 
+# Model-specific costs per million tokens
+# Based on Anthropic pricing page (ensure these are up-to-date for actual billing)
 COSTS_PER_MILLION_TOKENS = {
-    "cache_creation_input_tokens": 3.75,
-    "cache_read_input_tokens": 0.30,
-    "input_tokens": 3.00,  # Standard input if not fitting cache categories
-    "output_tokens": 15.00,
+    "claude-3-5-sonnet-20240620": {
+        "input_tokens": 3.00,                   # Base Input Tokens
+        "output_tokens": 15.00,                  # Output Tokens
+        "cache_creation_input_tokens": 3.75,   # 5m Cache Writes
+        "cache_read_input_tokens": 0.30,       # Cache Hits & Refreshes
+    },
+    "claude-3-opus-20240229": { # Example, assuming Opus 3 pricing
+        "input_tokens": 15.00,
+        "output_tokens": 75.00,
+        "cache_creation_input_tokens": 18.75,
+        "cache_read_input_tokens": 1.50,
+    },
+    "claude-3-haiku-20240307": { # Example, assuming Haiku 3 pricing
+        "input_tokens": 0.25,
+        "output_tokens": 1.25,
+        "cache_creation_input_tokens": 0.30,
+        "cache_read_input_tokens": 0.03,
+    },
+    # Add other models as needed
+    "claude-sonnet-4-20250514": {
+        "input_tokens": 3.00,                   # Base Input Tokens
+        "output_tokens": 15.00,                  # Output Tokens
+        "cache_creation_input_tokens": 3.75,   # 5m Cache Writes
+        "cache_read_input_tokens": 0.30,       # Cache Hits & Refreshes
+    },
+    "claude-opus-4-20240229": { # Example, assuming Opus 3 pricing
+        "input_tokens": 15.00,
+        "output_tokens": 75.00,
+        "cache_creation_input_tokens": 18.75,
+        "cache_read_input_tokens": 1.50,
+    },
+    "claude-3-5-haiku-20241022": { # Example, assuming Haiku 3 pricing
+        "input_tokens": 0.8,
+        "output_tokens": 4,
+        "cache_creation_input_tokens": 1,
+        "cache_read_input_tokens": 0.08,
+    },
 }
+
+# Fallback costs if the current MODEL_NAME is not in the dictionary (uses DEFAULT_MODEL's costs)
+DEFAULT_MODEL_COSTS = COSTS_PER_MILLION_TOKENS.get(DEFAULT_MODEL, {
+    "input_tokens": 3.00, "output_tokens": 15.00, 
+    "cache_creation_input_tokens": 3.75, "cache_read_input_tokens": 0.30
+}) # Ensure DEFAULT_MODEL always has a defined cost or a hardcoded default
 
 # Configure Streamlit page
 st.set_page_config(page_title=f"Chatbot (Tokens & Cost) - {MODEL_NAME}", page_icon="🪙")
@@ -129,6 +170,8 @@ if "session_total_usage" not in st.session_state:
     st.session_state.session_total_usage = {}
 if "session_total_cost" not in st.session_state:
     st.session_state.session_total_cost = 0.0
+if "session_total_hypothetical_cost" not in st.session_state: # New state for hypothetical cost
+    st.session_state.session_total_hypothetical_cost = 0.0
 
 # --- UI Rendering --- 
 st.title("🤖 Chatbot with Token Counting & Cost")
@@ -165,7 +208,16 @@ with st.sidebar:
             st.metric(label=f"Total {token_type.replace('_', ' ').title()}", value=count)
     
     st.subheader("Total Estimated Cost")
-    st.metric(label="Session Cost", value=f"${st.session_state.session_total_cost:.6f}")
+    actual_session_cost = st.session_state.session_total_cost
+    hypothetical_session_cost = st.session_state.session_total_hypothetical_cost
+    
+    cost_display_value = f"${actual_session_cost:.6f}"
+    if hypothetical_session_cost > 0 and hypothetical_session_cost > actual_session_cost:
+        savings = hypothetical_session_cost - actual_session_cost
+        savings_percentage = (savings / hypothetical_session_cost) * 100
+        cost_display_value += f" (Saved {savings_percentage:.2f}%)"
+    
+    st.metric(label="Session Cost", value=cost_display_value)
 
 # Handle user input
 if prompt := st.chat_input("What would you like to ask?"):
@@ -186,20 +238,31 @@ if prompt := st.chat_input("What would you like to ask?"):
 
         if displayed_response_text: # This will be non-empty if anything was yielded
             current_cost = 0.0
-            # A response is considered successful for cost calculation if usage_info is present.
-            # Error messages yielded by the generator won't have usage_info set.
+            current_turn_hypothetical_cost = 0.0
             is_successful_api_response = usage_info is not None
 
             if is_successful_api_response:
-                for token_type, cost_per_mil in COSTS_PER_MILLION_TOKENS.items():
+                model_specific_costs = COSTS_PER_MILLION_TOKENS.get(MODEL_NAME, DEFAULT_MODEL_COSTS)
+
+                # Calculate actual cost for the turn
+                for token_type, cost_per_mil in model_specific_costs.items():
                     tokens_used = getattr(usage_info, token_type, 0)
                     current_cost += (tokens_used / 1_000_000) * cost_per_mil
                 
-                for token_type in COSTS_PER_MILLION_TOKENS.keys():
-                    tokens_in_turn = getattr(usage_info, token_type, 0)
-                    st.session_state.session_total_usage[token_type] = \
-                        st.session_state.session_total_usage.get(token_type, 0) + tokens_in_turn
+                # Calculate hypothetical cost for the turn (if no caching)
+                current_turn_hypothetical_cost += (getattr(usage_info, "input_tokens", 0) / 1_000_000) * model_specific_costs["input_tokens"]
+                current_turn_hypothetical_cost += (getattr(usage_info, "output_tokens", 0) / 1_000_000) * model_specific_costs["output_tokens"]
+                current_turn_hypothetical_cost += (getattr(usage_info, "cache_creation_input_tokens", 0) / 1_000_000) * model_specific_costs["input_tokens"]
+                current_turn_hypothetical_cost += (getattr(usage_info, "cache_read_input_tokens", 0) / 1_000_000) * model_specific_costs["output_tokens"]
+
+                # Update session totals for actual usage and cost
+                for token_type_key in model_specific_costs.keys(): # Iterate through defined cost keys to update usage
+                    tokens_in_turn = getattr(usage_info, token_type_key, 0)
+                    if tokens_in_turn > 0: # Only update usage if tokens were actually used for this type
+                        st.session_state.session_total_usage[token_type_key] = \
+                            st.session_state.session_total_usage.get(token_type_key, 0) + tokens_in_turn
                 st.session_state.session_total_cost += current_cost
+                st.session_state.session_total_hypothetical_cost += current_turn_hypothetical_cost
 
             # Add to message history. 
             # displayed_response_text is what user saw (could be an error message from generator)
