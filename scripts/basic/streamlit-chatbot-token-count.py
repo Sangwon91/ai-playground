@@ -212,12 +212,14 @@ with st.sidebar:
     hypothetical_session_cost = st.session_state.session_total_hypothetical_cost
     
     cost_display_value = f"${actual_session_cost:.6f}"
+
+    label = "Session Cost"
     if hypothetical_session_cost > 0 and hypothetical_session_cost > actual_session_cost:
         savings = hypothetical_session_cost - actual_session_cost
         savings_percentage = (savings / hypothetical_session_cost) * 100
-        cost_display_value += f" (Saved {savings_percentage:.2f}%)"
+        label += f" (Saved {savings_percentage:.2f}%)"
     
-    st.metric(label="Session Cost", value=cost_display_value)
+    st.metric(label=label, value=cost_display_value)
 
 # Handle user input
 if prompt := st.chat_input("What would you like to ask?"):
