@@ -1,5 +1,4 @@
 import streamlit as st
-import asyncio
 import os
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
@@ -7,8 +6,9 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+model_name = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
 # Configure Streamlit page
-st.set_page_config(page_title="Streamlit Anthropic Chatbot", page_icon="🤖")
+st.set_page_config(page_title=f"Streamlit Anthropic Chatbot - {model_name}", page_icon="🤖")
 
 # Initialize Anthropic client
 # Ensure ANTHROPIC_API_KEY is set in your .env file
@@ -25,7 +25,6 @@ async def get_anthropic_response_stream(message_history_for_api: list):
     Handles potential API errors.
     """
     try:
-        model_name = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
         async with client.messages.stream(
             max_tokens=2048,  # Increased max_tokens for potentially longer conversations
             messages=message_history_for_api,
