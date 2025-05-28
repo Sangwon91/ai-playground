@@ -199,42 +199,50 @@ if "_stream_stopped_by_user_flag" not in st.session_state: # To append info mess
 st.title("🤖 Stoppable Chatbot with Token Counting & Cost")
 st.caption(f"Using model: {MODEL_NAME}")
 
+# Placeholder for the stop button - Define it before messages and input for stable positioning
+# This placeholder will be populated when streaming_in_progress is true.
+stop_button_placeholder = st.empty()
+
 # Display chat messages from history
 for msg_idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if (
             message["role"] == "assistant"
-            and "usage" in message
-            and message["usage"] # This could be None if stream was stopped before usage was retrieved
-        ):
-            usage = message["usage"]
+        ): # Check assistant role first
+            usage = message.get("usage") # Use .get for safer access
             cost = message.get("cost", 0.0)
-            details = []
-            token_types_ordered = [
-                "input_tokens",
-                "output_tokens",
-                "cache_creation_input_tokens",
-                "cache_read_input_tokens",
-            ]
-            for token_type in token_types_ordered:
-                # Check if attribute exists in usage (it's a Pydantic model or dict)
-                count = 0
-                if isinstance(usage, dict) and token_type in usage:
-                    count = usage[token_type]
-                elif hasattr(usage, token_type):
-                    count = getattr(usage, token_type)
-                
-                if count > 0:
-                    details.append(
-                        f"{token_type.replace('_', ' ').title()}: {count}"
-                    )
+            stopped = message.get("stopped_by_user", False)
 
-            if cost > 0:
-                details.append(f"Cost: ${cost:.6f}")
+            if usage: # If usage data exists, display it
+                details = []
+                token_types_ordered = [
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                ]
+                for token_type in token_types_ordered:
+                    count = 0
+                    if isinstance(usage, dict) and token_type in usage:
+                        count = usage[token_type]
+                    elif hasattr(usage, token_type): # Handles Pydantic model
+                        count = getattr(usage, token_type)
+                    
+                    if count > 0:
+                        details.append(
+                            f"{token_type.replace('_', ' ').title()}: {count}"
+                        )
 
-            if details:
-                st.caption(", ".join(details))
+                if cost > 0:
+                    details.append(f"Cost: ${cost:.6f}")
+
+                if details:
+                    st.caption(", ".join(details))
+            elif stopped: # No usage data, but we know it was stopped by the user
+                st.caption("[INFO] Streaming was stopped by the user. Full token usage for this partial response is unavailable.")
+            # If neither usage nor stopped, no specific usage/token caption is added for this message.
+
 
 # Sidebar for Session Totals
 with st.sidebar:
@@ -269,8 +277,18 @@ with st.sidebar:
 
     st.metric(label=label, value=cost_display_value)
 
-# Placeholder for the stop button
-stop_button_placeholder = st.empty()
+# Control Stop Button visibility based on streaming state.
+# This is outside the main 'if prompt:' block to ensure it reacts to streaming_in_progress
+# correctly across reruns, placing the button in a consistent location.
+if st.session_state.get("streaming_in_progress", False):
+    with stop_button_placeholder.container():
+        if st.button("Stop Generating", key="main_stop_button"):
+            st.session_state.stop_streaming = True
+            st.info("Stop request received. Finishing current processing...") # User feedback
+            # No st.rerun() here; the stream check or next natural rerun will handle UI update
+else:
+    stop_button_placeholder.empty() # Clear button if not streaming
+
 
 # Handle user input
 if prompt := st.chat_input("What would you like to ask?"):
@@ -294,21 +312,19 @@ if prompt := st.chat_input("What would you like to ask?"):
 
     with st.chat_message("assistant"):
         # Show stop button before starting the stream
-        if not st.session_state.streaming_in_progress: # Should be false here, but as a safeguard
-            with stop_button_placeholder.container():
-                if st.button("Stop Generating", key="stop_button_active"):
-                    st.session_state.stop_streaming = True
-                    st.info("Stop request received. Finishing current chunk...")
+        # This section for stop button is now handled by the block above 'if prompt'
+        # So, we remove the previous stop_button_placeholder logic from here.
         
-        # Set streaming in progress true just before the call
-        st.session_state.streaming_in_progress = True 
+        # Set streaming in progress true just before the call - NO, it's set inside the generator
+        # st.session_state.streaming_in_progress = True 
         
         displayed_response_text = st.write_stream(
             get_anthropic_response_stream_with_usage(api_messages)
         )
         
         # Clear stop button after streaming finishes or is stopped
-        stop_button_placeholder.empty()
+        # This is also handled by the block above 'if prompt' based on streaming_in_progress
+        # stop_button_placeholder.empty()
         # streaming_in_progress is set to False inside the finally block of the generator
 
         usage_info = st.session_state.pop('_current_stream_usage_data', None)
@@ -372,6 +388,7 @@ if prompt := st.chat_input("What would you like to ask?"):
                     "content": final_assistant_message_content,
                     "usage": usage_info.model_dump() if usage_info and hasattr(usage_info, 'model_dump') else (usage_info if isinstance(usage_info, dict) else None),
                     "cost": current_cost,
+                    "stopped_by_user": was_stopped_by_user # Add this flag
                 }
             )
             st.rerun()
@@ -388,12 +405,14 @@ if prompt := st.chat_input("What would you like to ask?"):
 
 # This part ensures the stop button is shown if a stream is ongoing upon rerun
 # (e.g. if rerun happens for a reason other than new message or stop button click)
-if st.session_state.get("streaming_in_progress", False):
-    with stop_button_placeholder.container():
-        if st.button("Stop Generating", key="stop_button_visible_on_rerun"):
-            st.session_state.stop_streaming = True
-            st.info("Stop request received. Finishing current chunk...")
-elif not st.session_state.get("streaming_in_progress", False):
-    # If not streaming, ensure placeholder is empty.
-    # This handles cases where a stream finished, and a rerun occurs before new input.
-    stop_button_placeholder.empty() 
+# This is now consolidated into the single stop_button_placeholder logic block above the chat input.
+# So, this redundant block below can be removed.
+# if st.session_state.get("streaming_in_progress", False):
+# with stop_button_placeholder.container():
+# if st.button("Stop Generating", key="stop_button_visible_on_rerun"):
+# st.session_state.stop_streaming = True
+# st.info("Stop request received. Finishing current chunk...")
+# elif not st.session_state.get("streaming_in_progress", False):
+# # If not streaming, ensure placeholder is empty.
+# # This handles cases where a stream finished, and a rerun occurs before new input.
+# stop_button_placeholder.empty() 
