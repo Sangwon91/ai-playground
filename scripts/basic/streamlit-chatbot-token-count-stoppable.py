@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Configuration & Constants ---
-DEFAULT_MODEL = "claude-3-5-sonnet-20240620" # Changed default to a more recent one
+DEFAULT_MODEL = "claude-3-5-haiku-20241022" # Changed default to a more recent one
 MODEL_NAME = os.getenv("ANTHROPIC_MODEL", DEFAULT_MODEL)
 
 # Model-specific costs per million tokens
