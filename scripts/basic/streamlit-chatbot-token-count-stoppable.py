@@ -132,7 +132,6 @@ async def get_anthropic_response_stream_with_usage(
             async for text_chunk in stream.text_stream:
                 if st.session_state.get("stop_streaming", False):
                     st.session_state._stream_stopped_by_user_flag = True
-                    st.info("Streaming stopped by user request.")
                     break  # Exit the loop if stop_streaming is True
                 full_response_text += text_chunk
                 yield text_chunk
@@ -147,7 +146,6 @@ async def get_anthropic_response_stream_with_usage(
                 # This is okay, we'll handle None usage_data later.
                 st.warning(f"Could not get final message data after stream stop/completion: {e_final}")
                 st.session_state._current_stream_usage_data = None
-
 
             st.session_state._current_stream_full_text = full_response_text
         yield ""  # Ensure stream finalization for st.write_stream
@@ -278,28 +276,22 @@ with st.sidebar:
     st.metric(label=label, value=cost_display_value)
 
 # Control Stop Button visibility based on streaming state.
-# This is outside the main 'if prompt:' block to ensure it reacts to streaming_in_progress
-# correctly across reruns, placing the button in a consistent location.
 if st.session_state.get("streaming_in_progress", False):
     with stop_button_placeholder.container():
         if st.button("Stop Generating", key="main_stop_button"):
             st.session_state.stop_streaming = True
-            st.info("Stop request received. Finishing current processing...") # User feedback
-            # No st.rerun() here; the stream check or next natural rerun will handle UI update
+            st.info("Stop request processing...") 
 else:
     stop_button_placeholder.empty() # Clear button if not streaming
 
 
 # Handle user input
 if prompt := st.chat_input("What would you like to ask?"):
-    if st.session_state.streaming_in_progress:
+    if st.session_state.get("streaming_in_progress", False): # Check before modifying state for new prompt
         st.session_state.stop_streaming = True # Signal to stop current stream
         st.info("Stopping current response to process new input...")
-        # Potentially wait a brief moment for the stream to actually stop
-        # However, the logic in get_anthropic_response_stream_with_usage should handle this.
-
-    st.session_state.stop_streaming = False # Reset for the new message
-    st.session_state._stream_stopped_by_user_flag = False # Reset for new message
+        # The old stream will see this flag and stop. Its `finally` block will set streaming_in_progress=False.
+        # We proceed to set up for the new stream.
 
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -310,31 +302,39 @@ if prompt := st.chat_input("What would you like to ask?"):
         for m in st.session_state.messages
     ]
 
+    # Initialize states for the NEW stream about to start
+    st.session_state.streaming_in_progress = True
+    st.session_state.stop_streaming = False # Critical: ensure new stream doesn't immediately stop
+    st.session_state._stream_stopped_by_user_flag = False # Reset this flag for the new stream
+    st.session_state._current_stream_full_text = "" # Initialize for the new stream
+    st.session_state._current_stream_usage_data = None # Initialize for the new stream
+
     with st.chat_message("assistant"):
-        # Show stop button before starting the stream
-        # This section for stop button is now handled by the block above 'if prompt'
-        # So, we remove the previous stop_button_placeholder logic from here.
-        
-        # Set streaming in progress true just before the call - NO, it's set inside the generator
-        # st.session_state.streaming_in_progress = True 
+        # streaming_in_progress is True now. The button logic above this `if prompt` block
+        # will ensure the button is displayed on the rerun triggered by st.chat_input processing or st.rerun later.
         
         displayed_response_text = st.write_stream(
             get_anthropic_response_stream_with_usage(api_messages)
         )
         
-        # Clear stop button after streaming finishes or is stopped
-        # This is also handled by the block above 'if prompt' based on streaming_in_progress
-        # stop_button_placeholder.empty()
-        # streaming_in_progress is set to False inside the finally block of the generator
+        # After the stream (completed or stopped), streaming_in_progress is set to False by the generator's finally block.
+        # The button will be removed on the st.rerun() call below.
 
         usage_info = st.session_state.pop('_current_stream_usage_data', None)
         was_stopped_by_user = st.session_state.pop('_stream_stopped_by_user_flag', False)
+        # Use the explicitly accumulated full text from the generator session state variable
+        final_assistant_text = st.session_state.pop('_current_stream_full_text', "")
 
-        final_assistant_message_content = displayed_response_text
+        final_assistant_message_content = final_assistant_text
+
         if was_stopped_by_user:
-            final_assistant_message_content += "\n\n[INFO] Streaming stopped by user."
+            if not final_assistant_text.strip(): # If stopped and message is empty
+                final_assistant_message_content = "[INFO] Streaming was stopped by user before any content was generated.]"
+            else:
+                final_assistant_message_content += "\n\n[INFO] Streaming stopped by user."
 
-        if displayed_response_text or was_stopped_by_user: # Even if stopped, add to history
+        # Add assistant message to history if there's content or if it was stopped (even if no actual text content from LLM)
+        if final_assistant_message_content.strip() or was_stopped_by_user:
             current_cost = 0.0
             current_turn_hypothetical_cost = 0.0
             
@@ -396,23 +396,19 @@ if prompt := st.chat_input("What would you like to ask?"):
             # This case means the generator yielded nothing and was not stopped by user explicitly.
             if not any(
                 msg["role"] == "assistant"
-                and msg["content"].startswith("Error:")
+                and (msg["content"].startswith("Error:") or (msg.get("usage") is None and not msg.get("stopped_by_user")))
                 for msg in st.session_state.messages[-2:] # check last two for safety
             ):
                 st.error(
                     "Assistant did not return a message or an error. Please check logs or try again."
                 )
 
-# This part ensures the stop button is shown if a stream is ongoing upon rerun
-# (e.g. if rerun happens for a reason other than new message or stop button click)
-# This is now consolidated into the single stop_button_placeholder logic block above the chat input.
-# So, this redundant block below can be removed.
+# Redundant check for stop button visibility, main logic is above `if prompt`
+# This can be removed as the primary logic is now always active based on `streaming_in_progress`
 # if st.session_state.get("streaming_in_progress", False):
 # with stop_button_placeholder.container():
 # if st.button("Stop Generating", key="stop_button_visible_on_rerun"):
 # st.session_state.stop_streaming = True
 # st.info("Stop request received. Finishing current chunk...")
 # elif not st.session_state.get("streaming_in_progress", False):
-# # If not streaming, ensure placeholder is empty.
-# # This handles cases where a stream finished, and a rerun occurs before new input.
 # stop_button_placeholder.empty() 
