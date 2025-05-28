@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FastAPI Chatbot</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Stoppable Chatbot with Token Counting & Cost</h1>
+            <p>Using model: <span id="modelName"></span></p>
+        </header>
+
+        <div class="chat-sidebar-container">
+            <div class="chat-window">
+                <div id="chatMessages">
+                    <!-- Chat messages will be appended here -->
+                </div>
+                <div id="stopButtonContainer">
+                    <button id="stopButton" style="display: none;">Stop Generating</button>
+                </div>
+                <div class="chat-input">
+                    <input type="text" id="messageInput" placeholder="What would you like to ask?">
+                    <button id="sendButton">Send</button>
+                </div>
+            </div>
+
+            <aside class="sidebar">
+                <h2>Session Statistics</h2>
+                <div id="sessionTotals">
+                    <h3>Total Token Usage</h3>
+                    <div id="totalTokenUsage">
+                        <p>No API calls yet in this session.</p>
+                    </div>
+                    <h3>Total Estimated Cost</h3>
+                    <div id="totalSessionCost">
+                         <p>Session Cost: $0.000000</p>
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html> 

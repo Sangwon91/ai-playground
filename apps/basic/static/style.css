@@ -1,0 +1,228 @@
+body {
+    font-family: sans-serif;
+    margin: 0;
+    background-color: #f4f4f4;
+    color: #333;
+    display: flex;
+    justify-content: center;
+    padding-top: 20px;
+}
+
+.container {
+    width: 90%;
+    max-width: 1000px;
+    background-color: #fff;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+header {
+    background-color: #4CAF50;
+    color: white;
+    padding: 15px 20px;
+    text-align: center;
+}
+
+header h1 {
+    margin: 0;
+    font-size: 1.5em;
+}
+
+header p {
+    margin: 5px 0 0;
+    font-size: 0.9em;
+}
+
+.chat-sidebar-container {
+    display: flex;
+}
+
+.chat-window {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    height: 70vh; /* Fixed height for chat window */
+}
+
+#chatMessages {
+    flex-grow: 1;
+    overflow-y: auto;
+    border: 1px solid #ddd;
+    padding: 10px;
+    margin-bottom: 10px;
+    border-radius: 4px;
+    background-color: #f9f9f9;
+}
+
+.message {
+    margin-bottom: 10px;
+    padding: 8px 12px;
+    border-radius: 15px;
+    max-width: 70%;
+    word-wrap: break-word;
+}
+
+.user-message {
+    background-color: #DCF8C6;
+    align-self: flex-end;
+    margin-left: auto; /* Push to right */
+    border-bottom-right-radius: 5px;
+}
+
+.assistant-message {
+    background-color: #ECECEC;
+    align-self: flex-start;
+    margin-right: auto; /* Push to left */
+    border-bottom-left-radius: 5px;
+}
+
+.system-message {
+    font-style: italic;
+    color: #777;
+    text-align: center;
+    font-size: 0.9em;
+    background-color: #f0f0f0;
+    align-self: center;
+    width: fit-content;
+    padding: 5px 10px;
+}
+
+.error-message {
+    color: red;
+    font-weight: bold;
+    background-color: #ffebee;
+    border: 1px solid red;
+}
+
+.message-content {
+    white-space: pre-wrap; /* Preserve newlines and spaces */
+}
+
+.message-details {
+    font-size: 0.8em;
+    color: #555;
+    margin-top: 5px;
+    padding-top: 3px;
+    border-top: 1px dashed #ccc;
+}
+
+#stopButtonContainer {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 10px;
+}
+
+#stopButton {
+    padding: 10px 15px;
+    background-color: #f44336;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+#stopButton:disabled {
+    background-color: #ef9a9a;
+    cursor: not-allowed;
+}
+
+#stopButton:hover:not(:disabled) {
+    background-color: #d32f2f;
+}
+
+.chat-input {
+    display: flex;
+    margin-top: auto; /* Push to bottom */
+}
+
+.chat-input input[type="text"] {
+    flex-grow: 1;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px 0 0 4px;
+}
+
+.chat-input button {
+    padding: 10px 15px;
+    background-color: #4CAF50;
+    color: white;
+    border: none;
+    border-radius: 0 4px 4px 0;
+    cursor: pointer;
+}
+
+.chat-input button:disabled {
+    background-color: #a5d6a7;
+    cursor: not-allowed;
+}
+
+.chat-input button:hover:not(:disabled) {
+    background-color: #45a049;
+}
+
+.sidebar {
+    width: 250px;
+    border-left: 1px solid #ddd;
+    padding: 20px;
+    background-color: #f9f9f9;
+    height: 70vh; /* Match chat window height */
+    overflow-y: auto;
+}
+
+.sidebar h2 {
+    margin-top: 0;
+    font-size: 1.2em;
+    color: #333;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 10px;
+}
+
+.sidebar h3 {
+    font-size: 1em;
+    color: #555;
+    margin-top: 15px;
+    margin-bottom: 5px;
+}
+
+#totalTokenUsage p,
+#totalSessionCost p {
+    font-size: 0.9em;
+    margin: 5px 0;
+    color: #333;
+}
+
+#totalTokenUsage .metric-label,
+#totalSessionCost .metric-label {
+    font-weight: bold;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .chat-sidebar-container {
+        flex-direction: column;
+    }
+    .sidebar {
+        width: 100%;
+        border-left: none;
+        border-top: 1px solid #ddd;
+        height: auto; /* Adjust height for stacked layout */
+        max-height: 40vh; /* Limit height when stacked */
+    }
+    .chat-window {
+        height: 55vh; /* Adjust height for stacked layout */
+    }
+    .container {
+        width: 100%;
+        height: 100vh;
+        border-radius: 0;
+        box-shadow: none;
+    }
+    header {
+        padding: 10px 15px;
+    }
+    header h1 {
+        font-size: 1.3em;
+    }
+} 
