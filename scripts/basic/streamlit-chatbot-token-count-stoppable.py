@@ -320,26 +320,32 @@ if prompt := st.chat_input("What would you like to ask?"):
         # After the stream (completed or stopped), streaming_in_progress is set to False by the generator's finally block.
         # The button will be removed on the st.rerun() call below.
 
-        usage_info = st.session_state.pop('_current_stream_usage_data', None)
-        was_stopped_by_user = st.session_state.pop('_stream_stopped_by_user_flag', False)
-        # Use the explicitly accumulated full text from the generator session state variable
-        final_assistant_text = st.session_state.pop('_current_stream_full_text', "")
+        # Retrieve turn-specific results from session state (set by the generator)
+        retrieved_usage_info = st.session_state.get('_current_stream_usage_data')
+        retrieved_was_stopped_by_user = st.session_state.get('_stream_stopped_by_user_flag', False)
+        
+        # Clean up these session variables now that we have their values for this turn
+        st.session_state.pop('_current_stream_usage_data', None)
+        st.session_state.pop('_stream_stopped_by_user_flag', None)
+        st.session_state.pop('_current_stream_full_text', None) # Clean up the generator's internal accumulator too
 
-        final_assistant_message_content = final_assistant_text
+        # Use the text that was actually displayed by st.write_stream
+        # Ensure it's a string, even if None was returned by st.write_stream (though unlikely with yield "")
+        final_assistant_message_content = displayed_response_text if displayed_response_text is not None else ""
 
-        if was_stopped_by_user:
-            if not final_assistant_text.strip(): # If stopped and message is empty
+        if retrieved_was_stopped_by_user:
+            if not final_assistant_message_content.strip(): # If stopped and message is empty
                 final_assistant_message_content = "[INFO] Streaming was stopped by user before any content was generated.]"
             else:
-                final_assistant_message_content += "\n\n[INFO] Streaming stopped by user."
+                # Append to the existing content, ensuring no double newlines if original text ended with one.
+                final_assistant_message_content = f"{final_assistant_message_content.rstrip()}\n\n[INFO] Streaming stopped by user."
 
         # Add assistant message to history if there's content or if it was stopped (even if no actual text content from LLM)
-        if final_assistant_message_content.strip() or was_stopped_by_user:
+        if final_assistant_message_content.strip() or retrieved_was_stopped_by_user:
             current_cost = 0.0
             current_turn_hypothetical_cost = 0.0
             
-            # Only calculate cost if usage_info was successfully retrieved
-            is_successful_api_response = usage_info is not None 
+            is_successful_api_response = retrieved_usage_info is not None 
 
             if is_successful_api_response:
                 model_specific_costs = COSTS_PER_MILLION_TOKENS.get(
@@ -347,28 +353,24 @@ if prompt := st.chat_input("What would you like to ask?"):
                 )
 
                 for token_type, cost_per_mil in model_specific_costs.items():
-                    tokens_used = getattr(usage_info, token_type, 0)
+                    tokens_used = getattr(retrieved_usage_info, token_type, 0)
                     current_cost += (tokens_used / 1_000_000) * cost_per_mil
 
                 current_turn_hypothetical_cost += (
-                    getattr(usage_info, "input_tokens", 0) / 1_000_000
-                ) * model_specific_costs.get("input_tokens", 0) # Safe get
+                    getattr(retrieved_usage_info, "input_tokens", 0) / 1_000_000
+                ) * model_specific_costs.get("input_tokens", 0)
                 current_turn_hypothetical_cost += (
-                    getattr(usage_info, "output_tokens", 0) / 1_000_000
-                ) * model_specific_costs.get("output_tokens", 0) # Safe get
-                
-                # Cache creation/read tokens contribute to input/output based on Anthropic's model
-                # For hypothetical cost without caching, we assume these would be normal input/output
+                    getattr(retrieved_usage_info, "output_tokens", 0) / 1_000_000
+                ) * model_specific_costs.get("output_tokens", 0)
                 current_turn_hypothetical_cost += (
-                    getattr(usage_info, "cache_creation_input_tokens", 0) / 1_000_000
-                ) * model_specific_costs.get("input_tokens",0) # count as input_tokens if cache miss
+                    getattr(retrieved_usage_info, "cache_creation_input_tokens", 0) / 1_000_000
+                ) * model_specific_costs.get("input_tokens",0)
                 current_turn_hypothetical_cost += (
-                    getattr(usage_info, "cache_read_input_tokens", 0) / 1_000_000
-                ) * model_specific_costs.get("output_tokens",0) # count as output if cache hit then output (simplification)
-
+                    getattr(retrieved_usage_info, "cache_read_input_tokens", 0) / 1_000_000
+                ) * model_specific_costs.get("output_tokens",0)
 
                 for token_type_key in model_specific_costs.keys():
-                    tokens_in_turn = getattr(usage_info, token_type_key, 0)
+                    tokens_in_turn = getattr(retrieved_usage_info, token_type_key, 0)
                     if tokens_in_turn > 0:
                         st.session_state.session_total_usage[token_type_key] = (
                             st.session_state.session_total_usage.get(
@@ -381,14 +383,13 @@ if prompt := st.chat_input("What would you like to ask?"):
                     current_turn_hypothetical_cost
                 )
             
-            # Add to message history
             st.session_state.messages.append(
                 {
                     "role": "assistant",
                     "content": final_assistant_message_content,
-                    "usage": usage_info.model_dump() if usage_info and hasattr(usage_info, 'model_dump') else (usage_info if isinstance(usage_info, dict) else None),
+                    "usage": retrieved_usage_info.model_dump() if retrieved_usage_info and hasattr(retrieved_usage_info, 'model_dump') else (retrieved_usage_info if isinstance(retrieved_usage_info, dict) else None),
                     "cost": current_cost,
-                    "stopped_by_user": was_stopped_by_user # Add this flag
+                    "stopped_by_user": retrieved_was_stopped_by_user
                 }
             )
             st.rerun()
