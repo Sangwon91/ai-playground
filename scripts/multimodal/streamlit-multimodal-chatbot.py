@@ -322,37 +322,20 @@ else:
 
 # --- File Uploader and Input Handling ---
 # Place file uploader before chat input for better flow.
-# Using columns to place uploader and a potential "clear files" button side-by-side.
-input_col1, input_col2 = st.columns([3,1])
 
-with input_col1:
-    uploaded_files_widget = st.file_uploader(
-        "📎 Attach Images (PNG, JPG, GIF, WEBP) or PDFs",
-        type=["png", "jpg", "jpeg", "gif", "webp", "pdf"],
-        accept_multiple_files=True,
-        key="file_uploader_widget", # Unique key for the widget
-        help="Upload images or PDF documents to discuss with the chatbot. PDFs will be summarized if possible."
-    )
-
-with input_col2:
-    if st.session_state['current_uploaded_files']: # Show clear button only if files are staged
-        if st.button("Clear Attachments", key="clear_files_button"):
-            st.session_state['current_uploaded_files'] = []
-            # Clear the file uploader widget by resetting its key or value if necessary
-            # Streamlit handles this by re-running. If current_uploaded_files is empty,
-            # the uploader should reflect that on the next re-run.
-            st.rerun() # Force rerun to update UI immediately
+st.file_uploader(
+    "📎 Attach Images (PNG, JPG, GIF, WEBP) or PDFs",
+    type=["png", "jpg", "jpeg", "gif", "webp", "pdf"],
+    accept_multiple_files=True,
+    key="file_uploader_widget", # Unique key for the widget
+    help="Upload images or PDF documents to discuss with the chatbot. PDFs will be summarized if possible.",
+    on_change=lambda: setattr(st.session_state, 'current_uploaded_files', st.session_state.file_uploader_widget)
+    # Directly update current_uploaded_files when the uploader changes.
+)
 
 # Manage current_uploaded_files based on widget interactions
-if uploaded_files_widget: # If new files are uploaded via the widget
-    st.session_state['current_uploaded_files'] = uploaded_files_widget
-elif not st.session_state['prompt_submitted_this_run'] and not uploaded_files_widget:
-    # If no prompt was submitted (meaning it's a regular rerun) AND the widget is now empty,
-    # it means the user manually cleared files from the widget.
-    # So, update our session state list.
-    # However, if `uploaded_files_widget` is None because it was just cleared by "Clear Attachments" button
-    # and `st.session_state.current_uploaded_files` was already set to [], this is fine.
-    pass # `current_uploaded_files` is already managed by the "Clear" button or if widget has new files.
+# The on_change callback for file_uploader_widget now handles updating current_uploaded_files.
+# We still need logic if prompt_submitted_this_run to clear it after submission (done later).
 
 # Display previews of STAGED (but not yet submitted) files
 if st.session_state['current_uploaded_files']:
@@ -365,8 +348,20 @@ if st.session_state['current_uploaded_files']:
                 st.image(staged_file, caption=f"{staged_file.name[:20]}...", width=100)
             elif staged_file.type == "application/pdf":
                 st.caption(f"📄 {staged_file.name[:20]}...")
+    
+    # Moved "Clear Attachments" button here
+    if st.button("🗑️ Clear Staged Attachments", key="clear_files_button"):
+        st.session_state['current_uploaded_files'] = []
+        # Clear the file_uploader widget by resetting its value indirectly
+        # Setting current_uploaded_files to [] and rerunning should make the uploader appear empty.
+        st.rerun()
     st.markdown("---")
-
+else: # No current_uploaded_files, ensure uploader is also clear if it wasn't via button
+    # This handles case where user removes file from uploader directly (X icon on file)
+    # and we need to sync current_uploaded_files if the on_change didn't catch it or for robustness.
+    if st.session_state.file_uploader_widget is None and st.session_state['current_uploaded_files']:
+        st.session_state['current_uploaded_files'] = []
+        # st.rerun() # Optional: uncomment if direct uploader clearing needs immediate history sync
 
 if prompt := st.chat_input("Ask about images/PDFs or send a message..."):
     st.session_state['prompt_submitted_this_run'] = True
