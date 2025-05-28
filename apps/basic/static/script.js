@@ -241,9 +241,12 @@ document.addEventListener("DOMContentLoaded", function () {
     });
 
     stopButton.addEventListener("click", function () {
+        console.log("[DEBUG] Stop button clicked.");
         if (streamingInProgress && websocket && websocket.readyState === WebSocket.OPEN) {
-            websocket.send(JSON.stringify({ action: "stop_streaming" }));
-            stopButton.disabled = true; // Prevent multiple clicks
+            const stopPayload = { action: "stop_streaming" };
+            console.log("[DEBUG] Sending to server:", JSON.stringify(stopPayload));
+            websocket.send(JSON.stringify(stopPayload));
+            stopButton.disabled = true;
             // UI can show "Stopping..." message
             // The server will send stream_status: stopped_by_user and then stream_end
             // which will re-enable buttons.
