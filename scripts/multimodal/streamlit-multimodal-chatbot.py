@@ -16,7 +16,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Configuration & Constants ---
-DEFAULT_MODEL = "claude-3-5-haiku-20241022" # Updated default to Sonnet for better multimodal
+# DEFAULT_MODEL = "claude-3-5-haiku-20241022" # Updated default to Sonnet for better multimodal
+DEFAULT_MODEL = "claude-sonnet-4-20250514"
 MODEL_NAME = os.getenv("ANTHROPIC_MODEL", DEFAULT_MODEL)
 MAX_TOKENS_OUTPUT = 4096 # Increased max tokens for potentially larger multimodal responses
 
