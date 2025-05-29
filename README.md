@@ -19,3 +19,8 @@ local-ssl-proxy --source 8443 --target 8501
 local-ssl-proxy --source 8443 --target 8501 --cert localhost.pem --key localhost-key.pem
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout localhost-key.pem -out localhost.pem
 ```
+
+# 커스텀 포트
+```
+uv run streamlit run scripts/multimodal/streamlit-multimodal-chatbot.py --server.port 47886
+```

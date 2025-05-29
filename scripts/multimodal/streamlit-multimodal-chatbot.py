@@ -150,23 +150,46 @@ async def get_anthropic_response_stream_with_usage(
         st.error(f"Anthropic API Rate Limit Exceeded: {e}")
         yield f"Error: Rate limit exceeded. {e}"
     except APIStatusError as e:
-        # Don't try to access streaming response content directly
+        # Enhanced error handling for debugging
         st.error(f"🚨 API Status Error Details:")
-        st.error(f"Status Code: {e.status_code}")
-        st.error(f"Original Exception: {str(e)}")
+        st.error(f"**Status Code:** {e.status_code}")
+        st.error(f"**Original Exception:** {str(e)}")
         
-        # For streaming responses, don't try to access .text or .content
+        # For 400 errors, try to get more details about what went wrong
+        if e.status_code == 400:
+            st.error("**This is a Bad Request error - likely an issue with the message format.**")
+            
+            # Show current request structure in sidebar for debugging
+            with st.sidebar:
+                st.error("🔍 **Current Request Debug (400 Error)**")
+                st.write(f"Messages being sent: {len(api_messages_for_call)}")
+                for i, msg in enumerate(api_messages_for_call):
+                    with st.expander(f"API Msg {i+1} ({msg['role']})"):
+                        content = msg.get('content', [])
+                        for j, item in enumerate(content):
+                            st.write(f"Content {j+1}:")
+                            st.write(f"- Type: {item.get('type', 'unknown')}")
+                            if item.get('type') == 'text':
+                                st.write(f"- Text length: {len(item.get('text', ''))}")
+                            elif item.get('type') in ['image', 'document']:
+                                source = item.get('source', {})
+                                st.write(f"- Source type: {source.get('type', 'unknown')}")
+                                st.write(f"- Media type: {source.get('media_type', 'unknown')}")
+                                st.write(f"- Data length: {len(source.get('data', ''))}")
+                            if 'cache_control' in item:
+                                st.write(f"- Cache control: {item['cache_control']}")
+        
+        # Try to extract error details from response if available
+        error_msg = "No additional error details"
         if hasattr(e, 'response') and e.response:
-            st.error(f"Response type: {type(e.response)}")
-            # Only try to access headers, not content for streaming responses
             try:
                 if hasattr(e.response, 'headers'):
                     headers = dict(e.response.headers)
-                    st.error(f"Response headers: {headers}")
+                    st.error(f"**Response Headers:** {headers}")
             except Exception as header_error:
                 st.error(f"Could not access headers: {header_error}")
         
-        yield f"Error: API Status {e.status_code}. See error details above."
+        yield f"Error: API Status {e.status_code}. Check error details above and sidebar for debugging info."
     except APIError as e: # Catch more generic Anthropic errors
         st.error(f"Generic Anthropic API Error: {e}")
         yield f"Error: API Error. {e}"
@@ -296,6 +319,42 @@ with st.sidebar:
 
     else:
         st.metric(label=cost_label, value=cost_display_value)
+
+    # --- Debug Information (moved from main area) ---
+    st.header("🔍 Debug Info")
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    st.write(f"**Model:** {MODEL_NAME}")
+    st.write(f"**API Key:** {'✅ Present' if api_key else '❌ Missing'}")
+    
+    if st.session_state.messages:
+        st.write(f"**Total Messages:** {len(st.session_state.messages)}")
+        
+        # Show last few messages structure
+        st.subheader("Recent Messages")
+        recent_messages = st.session_state.messages[-3:] if len(st.session_state.messages) > 3 else st.session_state.messages
+        for i, msg in enumerate(recent_messages):
+            with st.expander(f"Message {len(st.session_state.messages) - len(recent_messages) + i + 1} ({msg['role']})"):
+                content = msg.get('content', [])
+                if isinstance(content, list):
+                    for j, item in enumerate(content):
+                        item_type = item.get('type', 'unknown')
+                        if item_type == 'text':
+                            text_preview = item.get('text', '')[:100] + '...' if len(item.get('text', '')) > 100 else item.get('text', '')
+                            st.write(f"Text: {text_preview}")
+                        elif item_type == 'image':
+                            st.write(f"Image: {item.get('source', {}).get('media_type', 'unknown')}")
+                        elif item_type == 'document':
+                            st.write(f"Document: {item.get('source', {}).get('media_type', 'unknown')}")
+                        else:
+                            st.write(f"Type: {item_type}")
+                        
+                        # Show cache_control if present
+                        if item.get('cache_control'):
+                            st.write(f"🟡 Cache: {item['cache_control']}")
+                else:
+                    st.write(f"Content (old format): {str(content)[:100]}...")
+    else:
+        st.write("**Messages:** None yet")
 
 
 # Control Stop Button visibility
@@ -472,39 +531,6 @@ if prompt := st.chat_input("Ask about images/PDFs or send a message..."):
     st.session_state['_stream_stopped_by_user_flag'] = False
     st.session_state['_current_stream_full_text'] = ""
     st.session_state['_current_stream_usage_data'] = None
-
-    # Debug: Check API key and basic setup
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        st.error("ANTHROPIC_API_KEY environment variable is not set!")
-        st.session_state['streaming_in_progress'] = False
-        st.stop()
-    
-    # Show basic debug info in an expander to keep UI clean
-    with st.expander("🔍 Debug Info (click to expand)"):
-        st.write(f"Model: {MODEL_NAME}")
-        st.write(f"API Key present: {'Yes' if api_key else 'No'}")
-        st.write(f"Number of messages to send: {len(api_messages_to_send)}")
-        
-        # Show the structure of messages being sent
-        st.write("📋 Messages being sent to API:")
-        for i, msg in enumerate(api_messages_to_send):
-            st.write(f"Message {i+1} - Role: {msg['role']}")
-            content = msg.get('content', [])
-            if isinstance(content, list):
-                for j, item in enumerate(content):
-                    item_type = item.get('type', 'unknown')
-                    if item_type == 'text':
-                        text_preview = item.get('text', '')[:100] + '...' if len(item.get('text', '')) > 100 else item.get('text', '')
-                        st.write(f"  Content {j+1}: text - {text_preview}")
-                    elif item_type == 'image':
-                        st.write(f"  Content {j+1}: image - {item.get('source', {}).get('media_type', 'unknown')} (base64 data)")
-                    elif item_type == 'document':
-                        st.write(f"  Content {j+1}: document - {item.get('source', {}).get('media_type', 'unknown')} (base64 data)")
-                    else:
-                        st.write(f"  Content {j+1}: {item_type}")
-            else:
-                st.write(f"  Content: {type(content)} - {str(content)[:100]}...")
 
     with st.chat_message("assistant"):
         # The stop button should be visible now due to streaming_in_progress=True and rerun.
