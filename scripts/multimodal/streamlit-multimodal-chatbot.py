@@ -214,23 +214,23 @@ stop_button_placeholder = st.empty()
 # Display chat messages from history
 for msg_idx, message_data in enumerate(st.session_state.messages):
     with st.chat_message(message_data["role"]):
-        content_to_display = message_data["content"]
-        if isinstance(content_to_display, list): # New multimodal format
-            for content_item in content_to_display:
+        content = message_data["content"]
+        if isinstance(content, str): # Old text-only format (backward compatibility)
+            st.markdown(content)
+        elif isinstance(content, list): # New unified API format
+            for content_item in content:
                 item_type = content_item.get("type")
                 if item_type == "text":
                     st.markdown(content_item["text"])
-                elif item_type == "image_url": # For displaying uploaded images
-                    st.image(content_item["image_url"]["url"], caption=content_item.get("caption", "Image"))
-                elif item_type == "tool_use" or item_type == "tool_result":
-                     # Basic display for tool use, can be expanded
-                    st.json(content_item)
-            if message_data["role"] == "user" and not any(c.get("type") == "text" for c in content_to_display if isinstance(c,dict)):
-                 # If user message had only non-text (e.g. only image), add a small note for clarity in history
-                 st.caption("[User uploaded media without additional text]")
-
-        elif isinstance(content_to_display, str): # Old format or pure text assistant response
-            st.markdown(content_to_display)
+                elif item_type == "image":
+                    # Convert API format to display format
+                    source = content_item.get("source", {})
+                    if source.get("type") == "base64":
+                        media_type = source.get("media_type", "image/png")
+                        base64_data = source.get("data", "")
+                        st.image(f"data:{media_type};base64,{base64_data}", caption="Image")
+                elif item_type == "document":
+                    st.caption("📄 PDF document")
         
         # Display usage and cost for assistant messages
         if message_data["role"] == "assistant":
@@ -240,17 +240,15 @@ for msg_idx, message_data in enumerate(st.session_state.messages):
 
             if usage:
                 details = []
-                # Order for display
                 token_types_ordered = [
                     "input_tokens", "output_tokens", 
                     "cache_creation_input_tokens", "cache_read_input_tokens"
                 ]
                 for token_type in token_types_ordered:
                     count = 0
-                    # Usage can be a dict (from model_dump) or a Pydantic model
                     if isinstance(usage, dict):
                         count = usage.get(token_type, 0)
-                    elif hasattr(usage, token_type): # Pydantic model object
+                    elif hasattr(usage, token_type):
                         count = getattr(usage, token_type, 0)
                     
                     if count > 0:
@@ -366,15 +364,14 @@ if prompt := st.chat_input("Ask about images/PDFs or send a message..."):
         # mechanism to ensure it stops before the new one starts if it becomes an issue.
         # For now, Streamlit's execution model should handle this sequentially.
 
-    # --- Construct User Message for History and API ---
-    user_message_content_for_history = [] # For display in Streamlit chat history
-    user_message_content_for_api = []   # For sending to Anthropic API
+    # --- Construct User Message for API (store in API format from the start) ---
+    user_message_content = [] # Single content array for both API and history
 
-    # 1. Process and Add Files from `st.session_state.current_uploaded_files` FIRST for API
+    # 1. Add files first
     if st.session_state['current_uploaded_files']:
         for uploaded_file_obj in st.session_state['current_uploaded_files']:
             file_bytes = uploaded_file_obj.getvalue()
-            file_size_mb = len(file_bytes) / (1024 * 1024)  # Convert to MB
+            file_size_mb = len(file_bytes) / (1024 * 1024)
             media_type = uploaded_file_obj.type
             
             if not media_type or media_type == "application/octet-stream":
@@ -383,273 +380,91 @@ if prompt := st.chat_input("Ask about images/PDFs or send a message..."):
                      media_type = guessed_media_type
 
             if media_type and media_type.startswith("image/"):
-                # Check image size (Anthropic has limits on image size)
-                if file_size_mb > 5:  # Conservative limit of 5MB
+                if file_size_mb > 5:
                     st.error(f"Image '{uploaded_file_obj.name}' is too large ({file_size_mb:.1f}MB). Please use images smaller than 5MB.")
-                    user_message_content_for_history.append({
-                        "type": "text",
-                        "text": f"[Error: Image '{uploaded_file_obj.name}' too large ({file_size_mb:.1f}MB)]"
-                    })
                     continue
                 
-                # Log image details for debugging
                 st.info(f"Processing image: {uploaded_file_obj.name} ({file_size_mb:.1f}MB, {media_type})")
-                
                 base64_image = base64.b64encode(file_bytes).decode("utf-8")
-                api_image_block = {
+                user_message_content.append({
                     "type": "image",
                     "source": {
                         "type": "base64",
                         "media_type": media_type,
                         "data": base64_image,
-                    },
-                    "cache_control": {"type": "ephemeral"}
-                }
-                user_message_content_for_api.append(api_image_block)
-                
-                # For history, order can be text then image for natural display
-                # So, we'll add to history after text or handle order there.
-                # For now, let's prepare history items and assemble later.
+                    }
+                })
 
             elif media_type == "application/pdf":
-                # Check PDF size
-                if file_size_mb > 10:  # Conservative limit of 10MB for PDFs
+                if file_size_mb > 10:
                     st.error(f"PDF '{uploaded_file_obj.name}' is too large ({file_size_mb:.1f}MB). Please use PDFs smaller than 10MB.")
-                    user_message_content_for_history.append({
-                        "type": "text",
-                        "text": f"[Error: PDF '{uploaded_file_obj.name}' too large ({file_size_mb:.1f}MB)]"
-                    })
                     continue
                 
                 try:
                     st.info(f"Processing PDF: {uploaded_file_obj.name} ({file_size_mb:.1f}MB)")
                     base64_pdf_data = base64.b64encode(file_bytes).decode("utf-8")
-                    api_pdf_block = {
+                    user_message_content.append({
                         "type": "document",
                         "source": {
                             "type": "base64",
                             "media_type": "application/pdf", 
                             "data": base64_pdf_data
-                        },
-                        "cache_control": {"type": "ephemeral"}
-                    }
-                    user_message_content_for_api.append(api_pdf_block)
-                    st.info(f"PDF '{uploaded_file_obj.name}' prepared for sending to AI with input caching enabled.")
+                        }
+                    })
                 except Exception as e_pdf:
-                    st.error(f"Could not process PDF {uploaded_file_obj.name} for API: {e_pdf}")
-                    # Add error to history as well
-                    user_message_content_for_history.append({
-                        "type": "text",
-                        "text": f"[Error processing PDF '{uploaded_file_obj.name}' for API. It will not be sent.]"
-                    })
-            # Other file types are currently ignored for API but noted for history later
+                    st.error(f"Could not process PDF {uploaded_file_obj.name}: {e_pdf}")
 
-    # 2. Add Text part (if any) to API message list AFTER files
+    # 2. Add text if provided
     if prompt:
-        user_message_content_for_api.append({"type": "text", "text": prompt})
+        user_message_content.append({"type": "text", "text": prompt})
 
-    # 3. Construct content for DISPLAY HISTORY (text first, then media)
-    if prompt:
-        user_message_content_for_history.append({"type": "text", "text": prompt})
-    
-    # Add successfully processed files and any errors to history
-    if st.session_state['current_uploaded_files']:
-        for uploaded_file_obj in st.session_state['current_uploaded_files']:
-            media_type = uploaded_file_obj.type
-            if not media_type or media_type == "application/octet-stream":
-                 guessed_media_type, _ = mimetypes.guess_type(uploaded_file_obj.name)
-                 if guessed_media_type:
-                     media_type = guessed_media_type
-            
-            if media_type and media_type.startswith("image/"):
-                # Check if this image was successfully added to the API list
-                # This requires matching based on some unique aspect if direct object comparison is not feasible
-                # For simplicity, we'll assume if it's an image, it was prepared for API.
-                # A more robust check might involve comparing base64 data or names if necessary.
-                was_added_to_api = any(
-                    item.get("type") == "image" and item.get("source",{}).get("media_type") == media_type
-                    # Add more specific checks if multiple images of same type can cause issues
-                    for item in user_message_content_for_api
-                )
-                if was_added_to_api: # Simple check, assumes one image of a type for now or relies on order
-                    file_bytes = uploaded_file_obj.getvalue()
-                    base64_image = base64.b64encode(file_bytes).decode("utf-8")
-                    user_message_content_for_history.append({
-                        "type": "image_url", 
-                        "image_url": {"url": f"data:{media_type};base64,{base64_image}"},
-                        "caption": uploaded_file_obj.name
-                    })
-            elif media_type == "application/pdf":
-                # Check if this PDF was successfully added to the API list
-                pdf_api_item_exists = any(
-                    item.get("type") == "document" and 
-                    item.get("source", {}).get("media_type") == "application/pdf" and
-                    # Potentially match by filename if storing original name in API block, or by data if feasible
-                    # For now, presence of *any* PDF in API list implies this one if only one PDF is common.
-                    # This check needs to be more robust if multiple PDFs are handled and one fails.
-                    # Let's assume a simple check: if a PDF exists in API content, it was this one.
-                    True # Simplified: if a PDF was to be processed, this is it.
-                    for item in user_message_content_for_api if isinstance(item, dict) and item.get("type") == "document"
-                )
-
-                if pdf_api_item_exists:
-                     # Check if an error was logged for *this specific file* during API prep
-                    pdf_had_processing_error = False # Placeholder for more specific error tracking if needed
-                    # For now, we rely on st.error having been called if there was an issue for this PDF.
-                    # The st.info message for successful PDF preparation will be shown if no st.error for this file.
-                    
-                    # If no specific error logged for THIS pdf, assume success & show info.
-                    # This logic can be improved by passing error status from API prep phase.
-                    # A simpler way for history: if it's in API list, it was processed.
-                    is_this_pdf_in_api_list = any(
-                        item.get("type") == "document" and 
-                        item.get("source", {}).get("media_type") == "application/pdf" and 
-                        base64.b64encode(uploaded_file_obj.getvalue()).decode("utf-8") == item.get("source",{}).get("data")
-                        for item in user_message_content_for_api if isinstance(item, dict)
-                    )
-                    if is_this_pdf_in_api_list:
-                        user_message_content_for_history.append({
-                            "type": "text", 
-                            "text": f"📄 User uploaded PDF: {uploaded_file_obj.name} (Content sent to AI for analysis)."
-                        })
-                        st.info(f"PDF '{uploaded_file_obj.name}' was included in the API request.")
-                    else:
-                        # This implies it wasn't added to API list, likely due to an error caught in API prep loop
-                        user_message_content_for_history.append({
-                            "type": "text",
-                            "text": f"[Error processing PDF '{uploaded_file_obj.name}'. It was not sent to the AI.]"
-                         })
-                # If processing failed above, an error like "Could not process PDF..." was already shown via st.error
-                # and a history item for that error might have been added there too.
-                # The goal here is to ensure history accurately reflects what happened.
-            else: 
-                user_message_content_for_history.append({
-                    "type": "text",
-                    "text": f"[User uploaded a file: {uploaded_file_obj.name} of type {media_type}. This type might not be processed by the AI.]"
-                })
-                st.warning(f"File '{uploaded_file_obj.name}' of type {media_type} may not be processed by the AI for the API call.")
-
-    # Ensure there's at least one text block if images/docs were sent for API, as per Anthropic API requirement.
-    # This is crucial if the user *only* uploads files and types no prompt.
-    if any(item["type"] == "image" or item["type"] == "document" for item in user_message_content_for_api):
-        if not any(item["type"] == "text" for item in user_message_content_for_api):
-            # If only media, no text prompt from user, add a default text part to API content.
-            user_message_content_for_api.append({"type": "text", "text": "Please analyze the following content."})
-            # Also add to history for consistency, though user didn't type it
-            if not prompt: # Only add this to history if there was genuinely no text prompt from user
-                 user_message_content_for_history.insert(0, {"type": "text", "text": "[AI prompted to analyze uploaded content]"})
-
-
-    # --- Add to History and Prepare for API ---
-    if not user_message_content_for_history: # If only chat_input was an empty string and no files
+    # --- Add to History ---
+    if not user_message_content:
         st.warning("Please enter a message or upload a file.")
-        st.session_state['prompt_submitted_this_run'] = False # Reset flag
-        st.stop() # Don't proceed
+        st.session_state['prompt_submitted_this_run'] = False
+        st.stop()
 
-    st.session_state.messages.append({"role": "user", "content": user_message_content_for_history})
+    st.session_state.messages.append({"role": "user", "content": user_message_content})
     
-    # --- Display User's Message Immediately (Item 2) ---
+    # --- Display User's Message Immediately ---
     with st.chat_message("user"):
-        # This logic mirrors the main display loop for user messages
-        if isinstance(user_message_content_for_history, list):
-            for content_item in user_message_content_for_history:
-                item_type = content_item.get("type")
-                if item_type == "text":
-                    st.markdown(content_item["text"])
-                elif item_type == "image_url": # For displaying uploaded images
-                    st.image(content_item["image_url"]["url"], caption=content_item.get("caption", "Image"))
-            
-            # Simplified caption logic for immediate display if user uploaded media without text
-            # The full rerun will render captions more comprehensively using the main display loop logic.
-            prompt_text_provided = prompt and prompt.strip()
-            has_media_items = any(c.get("type") == "image_url" for c in user_message_content_for_history if isinstance(c,dict))
-            if not prompt_text_provided and has_media_items:
-                 # Check if the only text is the auto-generated one
-                 is_only_auto_prompt_text = True
-                 has_any_text = False
-                 for item in user_message_content_for_history:
-                     if item.get("type") == "text":
-                         has_any_text = True
-                         if item.get("text") != "[AI prompted to analyze uploaded content]":
-                             is_only_auto_prompt_text = False
-                             break
-                 if not has_any_text or is_only_auto_prompt_text:
-                    st.caption("[User uploaded media without additional text]")
+        for content_item in user_message_content:
+            if content_item.get("type") == "text":
+                st.markdown(content_item["text"])
+            elif content_item.get("type") == "image":
+                # Convert API format back to display format
+                source = content_item.get("source", {})
+                if source.get("type") == "base64":
+                    media_type = source.get("media_type", "image/png")
+                    base64_data = source.get("data", "")
+                    st.image(f"data:{media_type};base64,{base64_data}", caption="Uploaded Image")
+            elif content_item.get("type") == "document":
+                st.caption("📄 PDF document uploaded")
 
-    # Clear the staged files list for our internal tracking
+    # Clear staged files
     st.session_state['current_uploaded_files'] = []
-    # Increment key suffix to reset file_uploader on next rerun
     st.session_state.uploader_key_suffix = st.session_state.get('uploader_key_suffix', 0) + 1
-    
-    # Potentially trigger a rerun here to clear the file_uploader widget if it doesn't clear automatically
-    # This might be implicitly handled by the rerun after assistant's response.
 
-    # --- Prepare API Message History ---
-    # This needs to correctly format all messages, especially older ones.
+    # --- Prepare API Messages (direct copy since already in API format) ---
     api_messages_to_send = []
     for msg_data in st.session_state.messages:
-        api_role = msg_data["role"]
-        api_content = None
+        api_messages_to_send.append({
+            "role": msg_data["role"], 
+            "content": msg_data["content"]
+        })
 
-        # Current turn's user message is already in API format
-        if msg_data["content"] == user_message_content_for_history: #This is a bit fragile check
-            # More robust: check if it's the last message and role is user
-            if msg_data == st.session_state.messages[-1] and api_role == "user":
-                 api_content = user_message_content_for_api # Use the specifically prepared API content
-            # else: it's a historical user message, needs conversion if old format
-        
-        if not api_content: # If not the current user message, convert/prepare historical messages
-            stored_content = msg_data["content"]
-            if isinstance(stored_content, str): # Old text-only format
-                api_content = [{"type": "text", "text": stored_content}]
-            elif isinstance(stored_content, list): # New multimodal format (already stored for history)
-                temp_api_content = []
-                for item in stored_content:
-                    item_type = item.get("type")
-                    if item_type == "text":
-                        temp_api_content.append({"type": "text", "text": item["text"]})
-                    elif item_type == "image_url" and api_role == "user": # Handle historical user images
-                        image_url_spec = item.get("image_url")
-                        if image_url_spec and "url" in image_url_spec:
-                            url_data = image_url_spec["url"]
-                            if url_data.startswith("data:") and ";base64," in url_data:
-                                try:
-                                    header, base64_data = url_data.split(";base64,", 1)
-                                    media_type_from_url = header.split("data:", 1)[1]
-                                    temp_api_content.append({
-                                        "type": "image",
-                                        "source": {
-                                            "type": "base64",
-                                            "media_type": media_type_from_url,
-                                            "data": base64_data
-                                        }
-                                    })
-                                except ValueError:
-                                    # print(f"Warning: Malformed data URL in history for role {api_role}: {url_data}") # Linter error, changed to pass
-                                    pass # Skip this malformed image
-                    # PDFs in history are stored as text like "📄 User uploaded PDF..."
-                    # and handled by the "text" type. If PDF content needs to persist
-                    # for the API across turns, its storage/retrieval needs specific handling.
-
-                if temp_api_content:
-                    api_content = temp_api_content
-                # Fallbacks if list processing yields no usable content
-                elif api_role == "assistant" and not temp_api_content:
-                     api_content = [{"type": "text", "text": "[Assistant message had no processable text content for API history]"}]
-                elif api_role == "user" and not temp_api_content: # User message (list) yielded no content
-                     api_content = [{"type": "text", "text": "[User message had no processable text content for API history]"}]
-
-
-        if api_content: # Only add if content was successfully prepared
-            api_messages_to_send.append({"role": api_role, "content": api_content})
-        else:
-            # Log if a message with original content was skipped.
-            if msg_data.get("content"): # Check if original content existed
-                # print(f"Warning: Skipping a message in history for API call. Role: {api_role}. Original content type: {type(msg_data.get('content'))}. Processed api_content is None.") # Linter error, changed to pass
-                pass
-                # Optionally, add a placeholder to API to maintain turn structure, though this might not be desired.
-                # api_messages_to_send.append({"role": api_role, "content": [{"type": "text", "text": "[Skipped message due to conversion issue]"}]})
-
+    # --- Apply Cache Control to Last Message's Last Content Element ---
+    # Add cache_control to the last element of the last message's content before API call
+    if api_messages_to_send:
+        last_message = api_messages_to_send[-1]
+        if "content" in last_message and isinstance(last_message["content"], list) and last_message["content"]:
+            last_content_element = last_message["content"][-1]
+            if isinstance(last_content_element, dict):
+                # Create a copy to avoid modifying the original
+                last_content_copy = last_content_element.copy()
+                last_content_copy["cache_control"] = {"type": "ephemeral"}
+                # Replace the last element with the copy that has cache_control
+                last_message["content"][-1] = last_content_copy
 
     # --- Call API and Handle Response ---
     st.session_state['streaming_in_progress'] = True
@@ -724,8 +539,8 @@ if prompt := st.chat_input("Ask about images/PDFs or send a message..."):
             else:
                 final_assistant_message_content_text = f"{final_assistant_message_content_text.rstrip()}\\n\\n[INFO] Streaming stopped by user."
 
-        # Prepare assistant message for history (always text for now)
-        assistant_message_for_history = [{"type": "text", "text": final_assistant_message_content_text}]
+        # Store assistant message in unified API format
+        assistant_message_content = [{"type": "text", "text": final_assistant_message_content_text}]
 
         if final_assistant_message_content_text.strip() or retrieved_was_stopped_by_user:
             current_cost = 0.0
@@ -790,7 +605,7 @@ if prompt := st.chat_input("Ask about images/PDFs or send a message..."):
 
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": assistant_message_for_history, # Store as list of dicts
+                "content": assistant_message_content, # Store as list of dicts
                 "usage": usage_to_store,
                 "cost": current_cost,
                 "stopped_by_user": retrieved_was_stopped_by_user
