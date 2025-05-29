@@ -7,7 +7,7 @@ import json # For message passing with JS
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTextEdit, QPushButton, QVBoxLayout,
-    QWidget, QHBoxLayout, QLabel, QFileDialog, QSizePolicy, QMessageBox
+    QWidget, QHBoxLayout, QLabel, QFileDialog, QSizePolicy, QMessageBox, QGridLayout
 )
 from PySide6.QtGui import QColor, QPalette, QDesktopServices, QPixmap
 from PySide6.QtCore import Qt, Slot, QThread, Signal, QUrl, QDateTime
@@ -215,6 +215,11 @@ class ChatWindow(QMainWindow):
         self.markdown_parser = mistune.create_markdown(renderer=mistune.HTMLRenderer(escape=False)) # Allow HTML for images/etc.
         self.created_assistant_message_ids = set() # Keep track of created assistant message divs
 
+        # Session statistics
+        self.session_total_usage = {}
+        self.session_total_cost = 0.0
+        self.session_total_hypothetical_cost = 0.0
+
         self._init_ui()
         self._apply_styles()
 
@@ -256,28 +261,81 @@ class ChatWindow(QMainWindow):
         self.input_field = QTextEdit()
         self.input_field.setPlaceholderText("Ask about images/PDFs or send a message... (Shift+Enter for newline)")
         self.input_field.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.input_field.setFixedHeight(80) # Slightly taller input
+        self.input_field.setFixedHeight(60) # Adjusted height
         self.input_field.keyPressEvent = self._handle_input_key_press
-        input_controls_layout.addWidget(self.input_field)
+        input_controls_layout.addWidget(self.input_field, 3) # Give more stretch to input
 
-        buttons_layout = QVBoxLayout()
+        # Buttons Box (Attach, Send, Stop, Reset)
+        buttons_box_layout = QVBoxLayout()
+        
+        action_buttons_layout = QHBoxLayout()
         self.attach_button = QPushButton("📎 Attach")
         self.attach_button.clicked.connect(self._attach_file)
         self.attach_button.setEnabled(False) # Disable initially
-        buttons_layout.addWidget(self.attach_button)
+        action_buttons_layout.addWidget(self.attach_button)
         
         self.send_button = QPushButton("Send")
-        self.send_button.clicked.connect(self._send_message_slot) # Renamed to avoid conflict
+        self.send_button.clicked.connect(self._send_message_slot)
         self.send_button.setEnabled(False) # Disable initially
-        buttons_layout.addWidget(self.send_button)
-        
+        action_buttons_layout.addWidget(self.send_button)
+        buttons_box_layout.addLayout(action_buttons_layout)
+
+        control_buttons_layout = QHBoxLayout()
         self.stop_button = QPushButton("Stop")
         self.stop_button.clicked.connect(self._stop_generation)
         self.stop_button.setEnabled(False)
-        buttons_layout.addWidget(self.stop_button)
+        control_buttons_layout.addWidget(self.stop_button)
+
+        self.reset_button = QPushButton("🔄 Reset Chat")
+        self.reset_button.clicked.connect(self._reset_chat_slot)
+        self.reset_button.setEnabled(False) # Disable initially, enable with other controls
+        control_buttons_layout.addWidget(self.reset_button)
+        buttons_box_layout.addLayout(control_buttons_layout)
         
-        input_controls_layout.addLayout(buttons_layout)
+        input_controls_layout.addLayout(buttons_box_layout, 1) # Less stretch for buttons area
         main_layout.addLayout(input_controls_layout)
+
+        # Usage and Cost Display Area
+        self.usage_cost_area = QWidget()
+        usage_cost_layout = QGridLayout(self.usage_cost_area)
+        usage_cost_layout.setContentsMargins(5,5,5,5)
+        main_layout.addWidget(self.usage_cost_area)
+
+        row = 0
+        # Input Tokens
+        usage_cost_layout.addWidget(QLabel("Input Tokens:"), row, 0)
+        self.input_tokens_val = QLabel("0")
+        usage_cost_layout.addWidget(self.input_tokens_val, row, 1)
+        # Output Tokens
+        usage_cost_layout.addWidget(QLabel("Output Tokens:"), row, 2)
+        self.output_tokens_val = QLabel("0")
+        usage_cost_layout.addWidget(self.output_tokens_val, row, 3)
+        row += 1
+        # Cache Creation Tokens
+        usage_cost_layout.addWidget(QLabel("Cache Create Tokens:"), row, 0)
+        self.cache_create_tokens_val = QLabel("0")
+        usage_cost_layout.addWidget(self.cache_create_tokens_val, row, 1)
+        # Cache Read Tokens
+        usage_cost_layout.addWidget(QLabel("Cache Read Tokens:"), row, 2)
+        self.cache_read_tokens_val = QLabel("0")
+        usage_cost_layout.addWidget(self.cache_read_tokens_val, row, 3)
+        row += 1
+        # Actual Cost
+        usage_cost_layout.addWidget(QLabel("<b>Session Cost:</b>"), row, 0)
+        self.actual_cost_val = QLabel("$0.000000")
+        usage_cost_layout.addWidget(self.actual_cost_val, row, 1)
+        # Hypothetical Cost & Savings
+        usage_cost_layout.addWidget(QLabel("Cost w/o Cache:"), row, 2)
+        self.hypo_cost_val = QLabel("$0.000000")
+        usage_cost_layout.addWidget(self.hypo_cost_val, row, 3)
+        self.savings_label = QLabel("Savings: $0.000000 (0.00%)")
+        usage_cost_layout.addWidget(self.savings_label, row, 4, 1, 2) # Span 2 columns for savings
+        self.savings_label.setVisible(False) # Initially hidden
+
+        # Set column stretches for a more balanced layout in the grid
+        usage_cost_layout.setColumnStretch(1, 1)
+        usage_cost_layout.setColumnStretch(3, 1)
+        usage_cost_layout.setColumnStretch(4, 1)        
         
         # Status bar for usage (optional)
         self.statusBar().showMessage("Initializing chat view...") # New initial message
@@ -585,6 +643,7 @@ class ChatWindow(QMainWindow):
         self.send_button.setEnabled(not busy)
         self.attach_button.setEnabled(not busy)
         self.stop_button.setEnabled(busy)
+        self.reset_button.setEnabled(busy)
 
     def _add_message_to_view(self, role, html_content, message_id=None):
         # Use json.dumps to safely escape html_content for JavaScript
@@ -655,7 +714,7 @@ class ChatWindow(QMainWindow):
             final_text = self.current_assistant_raw_text
             del self.current_assistant_raw_text # Clean up
 
-        usage_info = result_data.get("usage", {})
+        usage_info_dict = result_data.get("usage", {})
         stop_reason = result_data.get("stop_reason", "unknown")
 
         # Final processing of accumulated text
@@ -666,16 +725,61 @@ class ChatWindow(QMainWindow):
         
         self.chat_history_api.append({"role": "assistant", "content": [{"type": "text", "text": final_text}]}) # Store raw model output
         
-        # Display usage if available
-        if usage_info:
-            input_tk = usage_info.get('input_tokens', 0)
-            output_tk = usage_info.get('output_tokens', 0)
+        current_turn_cost = 0.0
+        current_turn_hypothetical_cost = 0.0
+        model_costs_for_turn = self._get_model_costs(MODEL_NAME)
+
+        if usage_info_dict: # If we got usage data
+            token_types_for_costing = [
+                "input_tokens", "output_tokens", 
+                "cache_creation_input_tokens", "cache_read_input_tokens"
+            ]
+            
+            for token_type_api_name in token_types_for_costing:
+                tokens_used_in_type = usage_info_dict.get(token_type_api_name, 0)
+                cost_per_mil = model_costs_for_turn.get(token_type_api_name, 0) # Get specific cost for this token type
+                
+                if tokens_used_in_type > 0:
+                    # Accumulate to session_total_usage
+                    self.session_total_usage[token_type_api_name] = \
+                        self.session_total_usage.get(token_type_api_name, 0) + tokens_used_in_type
+                    
+                    # Calculate actual cost for this token type
+                    current_turn_cost += (tokens_used_in_type / 1_000_000) * cost_per_mil
+
+            self.session_total_cost += current_turn_cost
+
+            # Calculate hypothetical cost for the turn
+            # Cost of (input_tokens + cache_creation_input_tokens) at standard input_tokens rate
+            hypo_input_standard_cost_rate = model_costs_for_turn.get("input_tokens", 0)
+            hypo_output_standard_cost_rate = model_costs_for_turn.get("output_tokens", 0)
+
+            # Actual input tokens + tokens used for creating cache (these are effectively inputs)
+            effective_input_tokens = usage_info_dict.get("input_tokens", 0) + \
+                                     usage_info_dict.get("cache_creation_input_tokens", 0)
+            current_turn_hypothetical_cost += (effective_input_tokens / 1_000_000) * hypo_input_standard_cost_rate
+
+            # Actual output tokens
+            output_tokens = usage_info_dict.get("output_tokens", 0)
+            current_turn_hypothetical_cost += (output_tokens / 1_000_000) * hypo_output_standard_cost_rate
+
+            # If cache_read_input_tokens were used, for hypo, cost them as if they were fresh input_tokens
+            cache_read_tokens = usage_info_dict.get("cache_read_input_tokens", 0)
+            current_turn_hypothetical_cost += (cache_read_tokens / 1_000_000) * hypo_input_standard_cost_rate
+            
+            self.session_total_hypothetical_cost += current_turn_hypothetical_cost
+
+        # Display status bar message
+        if usage_info_dict:
+            input_tk = usage_info_dict.get('input_tokens', 0)
+            output_tk = usage_info_dict.get('output_tokens', 0)
             self.statusBar().showMessage(f"Finished. Input: {input_tk} tokens, Output: {output_tk} tokens. Stop reason: {stop_reason}", 10000)
         else:
             self.statusBar().showMessage(f"Finished. Stop reason: {stop_reason}", 5000)
 
         self._set_ui_busy(False)
         self.current_assistant_message_id = None
+        self._update_usage_display() # Update display after response
 
     @Slot()
     def _stop_generation(self):
@@ -688,6 +792,10 @@ class ChatWindow(QMainWindow):
     def _show_error_popup(self, message):
         QMessageBox.critical(self, "Error", message)
         
+    def _get_model_costs(self, model_name_to_check):
+        """Safely retrieves costs for a given model, falling back to defaults."""
+        return COSTS_PER_MILLION_TOKENS.get(model_name_to_check, DEFAULT_MODEL_COSTS)
+
     @Slot(bool)
     def _handle_initial_load_finished(self, success):
         print(f"[Python] _handle_initial_load_finished called. Success: {success}") # Log this event
@@ -697,6 +805,7 @@ class ChatWindow(QMainWindow):
                 self.input_field.setEnabled(True)
                 self.send_button.setEnabled(True)
                 self.attach_button.setEnabled(True)
+                self.reset_button.setEnabled(True) # Enable reset button
                 self.statusBar().showMessage("Ready.", 3000)
             else:
                 self.statusBar().showMessage("ANTHROPIC_API_KEY is missing. Please set it in .env", 5000)
@@ -716,6 +825,53 @@ class ChatWindow(QMainWindow):
         self.chat_view.close() # Explicitly close web view
         del self.chat_view # Ensure it's deleted
         super().closeEvent(event)
+
+    @Slot()
+    def _update_usage_display(self):
+        # This will be filled in later to update the QLabel texts
+        # For now, just a print to confirm it's called
+        print("[Python] _update_usage_display called")
+        self.input_tokens_val.setText(f"{self.session_total_usage.get('input_tokens', 0):,}")
+        self.output_tokens_val.setText(f"{self.session_total_usage.get('output_tokens', 0):,}")
+        self.cache_create_tokens_val.setText(f"{self.session_total_usage.get('cache_creation_input_tokens', 0):,}")
+        self.cache_read_tokens_val.setText(f"{self.session_total_usage.get('cache_read_input_tokens', 0):,}")
+
+        self.actual_cost_val.setText(f"${self.session_total_cost:.6f}")
+        
+        if self.session_total_hypothetical_cost > self.session_total_cost and self.session_total_hypothetical_cost > 0:
+            savings = self.session_total_hypothetical_cost - self.session_total_cost
+            savings_percentage = (savings / self.session_total_hypothetical_cost) * 100
+            self.hypo_cost_val.setText(f"${self.session_total_hypothetical_cost:.6f}")
+            self.savings_label.setText(f"Savings: ${savings:.6f} ({savings_percentage:.2f}%)")
+            self.savings_label.setVisible(True)
+        else:
+            self.hypo_cost_val.setText(f"${self.session_total_hypothetical_cost:.6f}") # Show hypo cost even if no savings
+            self.savings_label.setVisible(False)
+
+    @Slot()
+    def _reset_chat_slot(self):
+        # This will be filled in later
+        # For now, just a print to confirm it's called
+        print("[Python] _reset_chat_slot called")
+
+        # Stop any current generation
+        if self.anthropic_worker and self.anthropic_worker.isRunning():
+            self._stop_generation()
+            # Consider waiting for worker to finish or forcibly terminate if necessary
+
+        self.chat_history_api = []
+        self.uploaded_files_data = []
+        self._update_staged_files_display() # Clear staged files UI
+        self.created_assistant_message_ids = set()
+        
+        # Reset statistics
+        self.session_total_usage = {}
+        self.session_total_cost = 0.0
+        self.session_total_hypothetical_cost = 0.0
+        
+        self._init_chat_html() # Reloads the initial empty chat HTML
+        self._update_usage_display() # Update display to show zeros
+        self.statusBar().showMessage("Chat reset.", 3000)
 
 
 if __name__ == "__main__":
