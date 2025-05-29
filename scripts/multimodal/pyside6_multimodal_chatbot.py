@@ -295,6 +295,8 @@ class ChatWindow(QMainWindow):
         <html>
         <head>
             <meta charset="UTF-8">
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
             <style>
                 body { font-family: sans-serif; margin: 0; padding: 10px; background-color: #2E2E2E; color: #F0F0F0; font-size: 11pt; }
                 .message-container { display: flex; flex-direction: column; }
@@ -335,6 +337,11 @@ class ChatWindow(QMainWindow):
                         container.appendChild(msgDiv);
                         window.scrollTo(0, document.body.scrollHeight); // Auto-scroll
                         
+                        // Apply syntax highlighting to code blocks within the new message
+                        msgDiv.querySelectorAll('pre code').forEach((block) => {
+                            hljs.highlightElement(block);
+                        });
+
                         // Notify MathJax to typeset new content if it's an assistant message
                         if (role === 'assistant' && window.MathJax && window.MathJax.startup && window.MathJax.startup.promise) {
                              window.MathJax.startup.promise.then(() => {
@@ -360,6 +367,12 @@ class ChatWindow(QMainWindow):
                         }
                         msgDiv.innerHTML = htmlContent;
                         window.scrollTo(0, document.body.scrollHeight);
+
+                        // Apply syntax highlighting to code blocks within the updated message
+                        msgDiv.querySelectorAll('pre code').forEach((block) => {
+                            hljs.highlightElement(block);
+                        });
+
                         if (window.MathJax && window.MathJax.startup && window.MathJax.startup.promise) {
                             window.MathJax.startup.promise.then(() => {
                                 MathJax.typesetPromise([msgDiv]).catch(function (err) { console.error('MathJax typesetting error:', err); });
@@ -504,14 +517,15 @@ class ChatWindow(QMainWindow):
                 api_content_blocks.append({
                     "type": "image", "source": {
                         "type": "base64", "media_type": file_info["type"], "data": file_info["data"]
-                    }#, "cache_control": {"type": "ephemeral"} # If using cache features
+                    }, "cache_control": {"type": "ephemeral"} # Added cache_control like Streamlit
                 })
                 display_html_parts.append(f"<img src='data:{file_info['type']};base64,{file_info['data']}' alt='{file_info['name']}'/><div class='file-info'>{file_info['name']}</div>")
             elif file_info["type"] == "application/pdf":
                 api_content_blocks.append({
-                    "type": "document", "source": { # Check Anthropic docs for current "document" type support
-                        "type": "base64", "media_type": "application/pdf", "data": file_info["data"], "name": file_info["name"]
-                    }
+                    "type": "document", "source": { 
+                        "type": "base64", "media_type": "application/pdf", "data": file_info["data"]
+                        # Removed "name": file_info["name"] from here
+                    }, "cache_control": {"type": "ephemeral"} # Added cache_control
                 })
                 display_html_parts.append(f"<div class='file-info'>📄 PDF Uploaded: {file_info['name']} (sent to AI)</div>")
             else:
