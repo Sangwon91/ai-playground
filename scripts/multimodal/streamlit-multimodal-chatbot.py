@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Configuration & Constants ---
-DEFAULT_MODEL = "claude-sonnet-4-20250514" # Updated default to Sonnet for better multimodal
+DEFAULT_MODEL = "claude-3-5-haiku-20241022" # Updated default to Sonnet for better multimodal
 MODEL_NAME = os.getenv("ANTHROPIC_MODEL", DEFAULT_MODEL)
 MAX_TOKENS_OUTPUT = 4096 # Increased max tokens for potentially larger multimodal responses
 
@@ -107,63 +107,39 @@ async def get_anthropic_response_stream_with_usage(
     st.session_state['streaming_in_progress'] = True
     st.session_state['_stream_stopped_by_user_flag'] = False
 
-    # Apply cache control to the last assistant message if it exists and is suitable
-    # The API expects cache_control on a specific content block within the message.
-    # We'll target the last text block of the *second to last* message if it was an assistant.
-    # This is because the *last* message is the user's current query.
-    api_messages_with_cache_control = [msg.copy() for msg in api_messages_for_call] # Deep copy
-
-    if len(api_messages_with_cache_control) >= 2: # Need at least user query + one previous message
-        second_last_message = api_messages_with_cache_control[-2]
-        if second_last_message.get("role") == "assistant":
-            content_list = second_last_message.get("content")
-            if isinstance(content_list, list):
-                # Find the last text block to apply cache control
-                for i in range(len(content_list) - 1, -1, -1):
-                    if content_list[i].get("type") == "text":
-                        # Ensure content_list[i] is a mutable copy if modifying
-                        if not isinstance(content_list[i], dict): # Should be a dict
-                            pass # Or log an error: malformed content
-                        else:
-                            # Create a copy of the content block to modify it
-                            # This avoids modifying the original in st.session_state.messages
-                            # The deep copy of api_messages_with_cache_control should handle this.
-                            # Let's ensure we are modifying the copy:
-                            
-                            # If api_messages_with_cache_control was made from st.session_state.messages:
-                            # original_content_block = second_last_message_original_ref["content"][i]
-                            # api_messages_with_cache_control[-2]["content"][i] = original_content_block.copy()
-                            # api_messages_with_cache_control[-2]["content"][i]["cache_control"] = {"type": "ephemeral"}
-                            # Simpler: since `api_messages_with_cache_control` is already a copy of `api_messages_for_call`
-                            # and `api_messages_for_call` should be a fresh build, direct modification here is okay.
-                            # However, `content_list` itself might be a reference if not careful during api_messages_for_call build.
-                            # To be safe, let's ensure the content block is copied if modifying history directly.
-                            # For this function, api_messages_for_call is built fresh, so modifying its copy is fine.
-                            
-                            current_block_copy = content_list[i].copy()
-                            current_block_copy["cache_control"] = {"type": "ephemeral"}
-                            content_list[i] = current_block_copy # Replace with modified copy
-                        break # Apply to only the last text block
+    # The section that previously modified api_messages_for_call[-2] for caching 
+    # assistant's response has been removed as per user request to simplify caching.
+    # Caching for user-uploaded media is handled during the construction of api_messages_for_call.
 
     try:
         async with client.messages.stream(
             max_tokens=MAX_TOKENS_OUTPUT,
-            messages=api_messages_with_cache_control, # Use the potentially modified list
+            messages=api_messages_for_call, # Directly use the prepared messages
             model=MODEL_NAME,
         ) as stream:
-            async for text_chunk in stream.text_stream:
-                if st.session_state.get("stop_streaming", False): # Check global stop signal
-                    st.session_state['_stream_stopped_by_user_flag'] = True
-                    break
-                full_response_text += text_chunk
-                yield text_chunk
-            
             try:
-                final_message = await stream.get_final_message()
-                st.session_state['_current_stream_usage_data'] = final_message.usage
-            except Exception as e_final:
-                st.warning(f"Could not get final message data: {e_final}")
-                st.session_state['_current_stream_usage_data'] = None # Ensure it's None on failure
+                async for text_chunk in stream.text_stream:
+                    if st.session_state.get("stop_streaming", False): # Check global stop signal
+                        st.session_state['_stream_stopped_by_user_flag'] = True
+                        break
+                    full_response_text += text_chunk
+                    yield text_chunk
+                
+                # Only try to get final message if streaming completed successfully
+                if not st.session_state.get("stop_streaming", False):
+                    try:
+                        final_message = await stream.get_final_message()
+                        st.session_state['_current_stream_usage_data'] = final_message.usage
+                    except Exception as e_final:
+                        st.warning(f"Could not get final message data: {e_final}")
+                        st.session_state['_current_stream_usage_data'] = None
+                else:
+                    st.session_state['_current_stream_usage_data'] = None
+                    
+            except Exception as stream_error:
+                st.error(f"Error during streaming: {stream_error}")
+                yield f"Error during streaming: {stream_error}"
+                st.session_state['_current_stream_usage_data'] = None
 
             st.session_state['_current_stream_full_text'] = full_response_text
         yield "" # Ensure stream finalization for st.write_stream
@@ -174,8 +150,23 @@ async def get_anthropic_response_stream_with_usage(
         st.error(f"Anthropic API Rate Limit Exceeded: {e}")
         yield f"Error: Rate limit exceeded. {e}"
     except APIStatusError as e:
-        st.error(f"Anthropic API Status Error (code {e.status_code}): {e.response}")
-        yield f"Error: API Status {e.status_code}. {e.response}"
+        # Don't try to access streaming response content directly
+        st.error(f"🚨 API Status Error Details:")
+        st.error(f"Status Code: {e.status_code}")
+        st.error(f"Original Exception: {str(e)}")
+        
+        # For streaming responses, don't try to access .text or .content
+        if hasattr(e, 'response') and e.response:
+            st.error(f"Response type: {type(e.response)}")
+            # Only try to access headers, not content for streaming responses
+            try:
+                if hasattr(e.response, 'headers'):
+                    headers = dict(e.response.headers)
+                    st.error(f"Response headers: {headers}")
+            except Exception as header_error:
+                st.error(f"Could not access headers: {header_error}")
+        
+        yield f"Error: API Status {e.status_code}. See error details above."
     except APIError as e: # Catch more generic Anthropic errors
         st.error(f"Generic Anthropic API Error: {e}")
         yield f"Error: API Error. {e}"
@@ -206,6 +197,7 @@ default_session_state_values = {
     "_current_stream_full_text": "",
     "current_uploaded_files": [], # For files uploaded but not yet submitted with a prompt
     "prompt_submitted_this_run": False, # Helper to manage file uploader state
+    "uploader_key_suffix": 0, # For resetting file_uploader by changing its key
 }
 for key, value in default_session_state_values.items():
     if key not in st.session_state:
@@ -323,14 +315,21 @@ else:
 # --- File Uploader and Input Handling ---
 # Place file uploader before chat input for better flow.
 
+# Define the on_change callback for the file uploader
+def on_uploader_change():
+    current_key = f"file_uploader_widget_{st.session_state.get('uploader_key_suffix', 0)}"
+    st.session_state.current_uploaded_files = st.session_state.get(current_key) or []
+
+current_uploader_key = f"file_uploader_widget_{st.session_state.get('uploader_key_suffix', 0)}"
+
 st.file_uploader(
     "📎 Attach Images (PNG, JPG, GIF, WEBP) or PDFs",
     type=["png", "jpg", "jpeg", "gif", "webp", "pdf"],
     accept_multiple_files=True,
-    key="file_uploader_widget", # Unique key for the widget
+    key=current_uploader_key, # Use dynamic key
     help="Upload images or PDF documents to discuss with the chatbot. PDFs will be summarized if possible.",
-    on_change=lambda: setattr(st.session_state, 'current_uploaded_files', st.session_state.file_uploader_widget)
-    # Directly update current_uploaded_files when the uploader changes.
+    on_change=on_uploader_change
+    # Directly update current_uploaded_files when the uploader changes, ensuring it's a list.
 )
 
 # Manage current_uploaded_files based on widget interactions
@@ -356,12 +355,6 @@ if st.session_state['current_uploaded_files']:
         # Setting current_uploaded_files to [] and rerunning should make the uploader appear empty.
         st.rerun()
     st.markdown("---")
-else: # No current_uploaded_files, ensure uploader is also clear if it wasn't via button
-    # This handles case where user removes file from uploader directly (X icon on file)
-    # and we need to sync current_uploaded_files if the on_change didn't catch it or for robustness.
-    if st.session_state.file_uploader_widget is None and st.session_state['current_uploaded_files']:
-        st.session_state['current_uploaded_files'] = []
-        # st.rerun() # Optional: uncomment if direct uploader clearing needs immediate history sync
 
 if prompt := st.chat_input("Ask about images/PDFs or send a message..."):
     st.session_state['prompt_submitted_this_run'] = True
@@ -381,6 +374,7 @@ if prompt := st.chat_input("Ask about images/PDFs or send a message..."):
     if st.session_state['current_uploaded_files']:
         for uploaded_file_obj in st.session_state['current_uploaded_files']:
             file_bytes = uploaded_file_obj.getvalue()
+            file_size_mb = len(file_bytes) / (1024 * 1024)  # Convert to MB
             media_type = uploaded_file_obj.type
             
             if not media_type or media_type == "application/octet-stream":
@@ -389,6 +383,18 @@ if prompt := st.chat_input("Ask about images/PDFs or send a message..."):
                      media_type = guessed_media_type
 
             if media_type and media_type.startswith("image/"):
+                # Check image size (Anthropic has limits on image size)
+                if file_size_mb > 5:  # Conservative limit of 5MB
+                    st.error(f"Image '{uploaded_file_obj.name}' is too large ({file_size_mb:.1f}MB). Please use images smaller than 5MB.")
+                    user_message_content_for_history.append({
+                        "type": "text",
+                        "text": f"[Error: Image '{uploaded_file_obj.name}' too large ({file_size_mb:.1f}MB)]"
+                    })
+                    continue
+                
+                # Log image details for debugging
+                st.info(f"Processing image: {uploaded_file_obj.name} ({file_size_mb:.1f}MB, {media_type})")
+                
                 base64_image = base64.b64encode(file_bytes).decode("utf-8")
                 api_image_block = {
                     "type": "image",
@@ -406,7 +412,17 @@ if prompt := st.chat_input("Ask about images/PDFs or send a message..."):
                 # For now, let's prepare history items and assemble later.
 
             elif media_type == "application/pdf":
+                # Check PDF size
+                if file_size_mb > 10:  # Conservative limit of 10MB for PDFs
+                    st.error(f"PDF '{uploaded_file_obj.name}' is too large ({file_size_mb:.1f}MB). Please use PDFs smaller than 10MB.")
+                    user_message_content_for_history.append({
+                        "type": "text",
+                        "text": f"[Error: PDF '{uploaded_file_obj.name}' too large ({file_size_mb:.1f}MB)]"
+                    })
+                    continue
+                
                 try:
+                    st.info(f"Processing PDF: {uploaded_file_obj.name} ({file_size_mb:.1f}MB)")
                     base64_pdf_data = base64.b64encode(file_bytes).decode("utf-8")
                     api_pdf_block = {
                         "type": "document",
@@ -532,8 +548,39 @@ if prompt := st.chat_input("Ask about images/PDFs or send a message..."):
 
     st.session_state.messages.append({"role": "user", "content": user_message_content_for_history})
     
-    # Clear the staged files now that they are part of the message
+    # --- Display User's Message Immediately (Item 2) ---
+    with st.chat_message("user"):
+        # This logic mirrors the main display loop for user messages
+        if isinstance(user_message_content_for_history, list):
+            for content_item in user_message_content_for_history:
+                item_type = content_item.get("type")
+                if item_type == "text":
+                    st.markdown(content_item["text"])
+                elif item_type == "image_url": # For displaying uploaded images
+                    st.image(content_item["image_url"]["url"], caption=content_item.get("caption", "Image"))
+            
+            # Simplified caption logic for immediate display if user uploaded media without text
+            # The full rerun will render captions more comprehensively using the main display loop logic.
+            prompt_text_provided = prompt and prompt.strip()
+            has_media_items = any(c.get("type") == "image_url" for c in user_message_content_for_history if isinstance(c,dict))
+            if not prompt_text_provided and has_media_items:
+                 # Check if the only text is the auto-generated one
+                 is_only_auto_prompt_text = True
+                 has_any_text = False
+                 for item in user_message_content_for_history:
+                     if item.get("type") == "text":
+                         has_any_text = True
+                         if item.get("text") != "[AI prompted to analyze uploaded content]":
+                             is_only_auto_prompt_text = False
+                             break
+                 if not has_any_text or is_only_auto_prompt_text:
+                    st.caption("[User uploaded media without additional text]")
+
+    # Clear the staged files list for our internal tracking
     st.session_state['current_uploaded_files'] = []
+    # Increment key suffix to reset file_uploader on next rerun
+    st.session_state.uploader_key_suffix = st.session_state.get('uploader_key_suffix', 0) + 1
+    
     # Potentially trigger a rerun here to clear the file_uploader widget if it doesn't clear automatically
     # This might be implicitly handled by the rerun after assistant's response.
 
@@ -556,26 +603,52 @@ if prompt := st.chat_input("Ask about images/PDFs or send a message..."):
             if isinstance(stored_content, str): # Old text-only format
                 api_content = [{"type": "text", "text": stored_content}]
             elif isinstance(stored_content, list): # New multimodal format (already stored for history)
-                # Convert from history display format to API format if needed
-                # e.g., "image_url" -> "image" with source, filter out display-only items
                 temp_api_content = []
                 for item in stored_content:
-                    if item.get("type") == "text":
+                    item_type = item.get("type")
+                    if item_type == "text":
                         temp_api_content.append({"type": "text", "text": item["text"]})
-                    # Assuming images in history are NOT already in API format.
-                    # Images from user are processed above. Assistant responses are text.
-                    # This part is mainly for assistant text messages stored in new list format.
+                    elif item_type == "image_url" and api_role == "user": # Handle historical user images
+                        image_url_spec = item.get("image_url")
+                        if image_url_spec and "url" in image_url_spec:
+                            url_data = image_url_spec["url"]
+                            if url_data.startswith("data:") and ";base64," in url_data:
+                                try:
+                                    header, base64_data = url_data.split(";base64,", 1)
+                                    media_type_from_url = header.split("data:", 1)[1]
+                                    temp_api_content.append({
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": media_type_from_url,
+                                            "data": base64_data
+                                        }
+                                    })
+                                except ValueError:
+                                    # print(f"Warning: Malformed data URL in history for role {api_role}: {url_data}") # Linter error, changed to pass
+                                    pass # Skip this malformed image
+                    # PDFs in history are stored as text like "📄 User uploaded PDF..."
+                    # and handled by the "text" type. If PDF content needs to persist
+                    # for the API across turns, its storage/retrieval needs specific handling.
+
                 if temp_api_content:
                     api_content = temp_api_content
-                elif api_role == "assistant": # If assistant message had no text (e.g. error display)
+                # Fallbacks if list processing yields no usable content
+                elif api_role == "assistant" and not temp_api_content:
                      api_content = [{"type": "text", "text": "[Assistant message had no processable text content for API history]"}]
+                elif api_role == "user" and not temp_api_content: # User message (list) yielded no content
+                     api_content = [{"type": "text", "text": "[User message had no processable text content for API history]"}]
 
 
         if api_content: # Only add if content was successfully prepared
             api_messages_to_send.append({"role": api_role, "content": api_content})
         else:
-            # Fallback for safety, should not happen with proper conversion
-            st.warning(f"Skipping a message in history for API call due to formatting issue: {msg_data}")
+            # Log if a message with original content was skipped.
+            if msg_data.get("content"): # Check if original content existed
+                # print(f"Warning: Skipping a message in history for API call. Role: {api_role}. Original content type: {type(msg_data.get('content'))}. Processed api_content is None.") # Linter error, changed to pass
+                pass
+                # Optionally, add a placeholder to API to maintain turn structure, though this might not be desired.
+                # api_messages_to_send.append({"role": api_role, "content": [{"type": "text", "text": "[Skipped message due to conversion issue]"}]})
 
 
     # --- Call API and Handle Response ---
@@ -584,6 +657,39 @@ if prompt := st.chat_input("Ask about images/PDFs or send a message..."):
     st.session_state['_stream_stopped_by_user_flag'] = False
     st.session_state['_current_stream_full_text'] = ""
     st.session_state['_current_stream_usage_data'] = None
+
+    # Debug: Check API key and basic setup
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        st.error("ANTHROPIC_API_KEY environment variable is not set!")
+        st.session_state['streaming_in_progress'] = False
+        st.stop()
+    
+    # Show basic debug info in an expander to keep UI clean
+    with st.expander("🔍 Debug Info (click to expand)"):
+        st.write(f"Model: {MODEL_NAME}")
+        st.write(f"API Key present: {'Yes' if api_key else 'No'}")
+        st.write(f"Number of messages to send: {len(api_messages_to_send)}")
+        
+        # Show the structure of messages being sent
+        st.write("📋 Messages being sent to API:")
+        for i, msg in enumerate(api_messages_to_send):
+            st.write(f"Message {i+1} - Role: {msg['role']}")
+            content = msg.get('content', [])
+            if isinstance(content, list):
+                for j, item in enumerate(content):
+                    item_type = item.get('type', 'unknown')
+                    if item_type == 'text':
+                        text_preview = item.get('text', '')[:100] + '...' if len(item.get('text', '')) > 100 else item.get('text', '')
+                        st.write(f"  Content {j+1}: text - {text_preview}")
+                    elif item_type == 'image':
+                        st.write(f"  Content {j+1}: image - {item.get('source', {}).get('media_type', 'unknown')} (base64 data)")
+                    elif item_type == 'document':
+                        st.write(f"  Content {j+1}: document - {item.get('source', {}).get('media_type', 'unknown')} (base64 data)")
+                    else:
+                        st.write(f"  Content {j+1}: {item_type}")
+            else:
+                st.write(f"  Content: {type(content)} - {str(content)[:100]}...")
 
     with st.chat_message("assistant"):
         # The stop button should be visible now due to streaming_in_progress=True and rerun.
