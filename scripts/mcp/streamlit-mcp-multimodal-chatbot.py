@@ -13,6 +13,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 import queue
 import functools
+import subprocess
+import tempfile
 
 # Configure logging
 logging.basicConfig(
@@ -361,6 +363,117 @@ async def call_mcp_tool_simple(session, tool_name: str, arguments: Dict[str, Any
         logger.error(f"MCP tool call failed: {e}")
         raise
 
+def call_tool_subprocess(config: MCPServerConfig, tool_name: str, arguments: Dict[str, Any]) -> str:
+    """Call MCP tool using subprocess to avoid all async issues"""
+    try:
+        logger.info(f"Calling {tool_name} via subprocess")
+        
+        # Create a Python script that will call the MCP tool
+        script_content = f'''
+import asyncio
+import json
+import sys
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from contextlib import AsyncExitStack
+
+async def call_tool():
+    try:
+        # Server parameters
+        server_params = StdioServerParameters(
+            command="{config.command}",
+            args={config.args!r},
+            env={config.env!r}
+        )
+        
+        # Connect to server
+        async with AsyncExitStack() as stack:
+            stdio_transport = await stack.enter_async_context(
+                stdio_client(server_params)
+            )
+            stdio_read, stdio_write = stdio_transport
+            
+            session = await stack.enter_async_context(
+                ClientSession(stdio_read, stdio_write)
+            )
+            
+            await session.initialize()
+            
+            # Call tool
+            result = await asyncio.wait_for(
+                session.call_tool("{tool_name}", {arguments!r}),
+                timeout=30.0
+            )
+            
+            # Extract content
+            if hasattr(result, 'content') and result.content:
+                content_list = result.content
+                text_parts = []
+                for content_item in content_list:
+                    if hasattr(content_item, 'type') and content_item.type == 'text':
+                        if hasattr(content_item, 'text'):
+                            text_parts.append(content_item.text)
+                
+                if text_parts:
+                    print(json.dumps({{"success": True, "result": "\\n".join(text_parts)}}))
+                else:
+                    print(json.dumps({{"success": True, "result": str(result)}}))
+            else:
+                print(json.dumps({{"success": True, "result": str(result)}}))
+                
+    except Exception as e:
+        print(json.dumps({{"success": False, "error": str(e)}}))
+
+if __name__ == "__main__":
+    asyncio.run(call_tool())
+'''
+        
+        # Write script to temporary file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            f.write(script_content)
+            script_path = f.name
+        
+        try:
+            # Run the script
+            result = subprocess.run(
+                [sys.executable, script_path],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=os.getcwd()
+            )
+            
+            if result.returncode == 0:
+                try:
+                    output = json.loads(result.stdout.strip())
+                    if output.get("success"):
+                        logger.info(f"Subprocess tool call successful")
+                        return output.get("result", "No result")
+                    else:
+                        error_msg = output.get("error", "Unknown error")
+                        logger.error(f"Tool call failed: {error_msg}")
+                        return f"Tool call failed: {error_msg}"
+                except json.JSONDecodeError:
+                    logger.error(f"Failed to parse output: {result.stdout}")
+                    return f"Failed to parse tool output: {result.stdout}"
+            else:
+                logger.error(f"Subprocess failed: {result.stderr}")
+                return f"Subprocess failed: {result.stderr}"
+                
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(script_path)
+            except:
+                pass
+                
+    except subprocess.TimeoutExpired:
+        logger.error("Subprocess timed out")
+        return "Tool call timed out"
+    except Exception as e:
+        logger.error(f"Subprocess call failed: {e}")
+        return f"Subprocess call failed: {str(e)}"
+
 def call_tool_sync(manager: MCPConnectionManager, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> str:
     """Synchronous wrapper for tool calling"""
     try:
@@ -370,6 +483,26 @@ def call_tool_sync(manager: MCPConnectionManager, server_name: str, tool_name: s
             return f"No active connection to server '{server_name}'"
         
         session, exit_stack, tools = connection_info
+        
+        # Get server config for subprocess method
+        config = manager.get_config(server_name)
+        if config:
+            # Try subprocess method first (more reliable)
+            logger.info(f"Trying subprocess method for {tool_name}")
+            subprocess_result = call_tool_subprocess(config, tool_name, arguments)
+            
+            # Check if subprocess method succeeded
+            if not subprocess_result.startswith("Tool call failed:") and \
+               not subprocess_result.startswith("Subprocess failed:") and \
+               not subprocess_result.startswith("Tool call timed out") and \
+               not subprocess_result.startswith("Subprocess call failed:"):
+                logger.info(f"Subprocess method succeeded for {tool_name}")
+                return subprocess_result
+            else:
+                logger.warning(f"Subprocess method failed: {subprocess_result}")
+        
+        # Fallback to original method
+        logger.info(f"Falling back to original method for {tool_name}")
         
         # Use run_async which handles nested event loops properly
         result = run_async(call_mcp_tool_simple(session, tool_name, arguments))
@@ -394,8 +527,29 @@ def call_tool_sync(manager: MCPConnectionManager, server_name: str, tool_name: s
         else:
             return str(result)
     except Exception as e:
-        logger.error(f"Sync tool call failed: {e}")
+        logger.error(f"All tool call methods failed: {e}")
         return f"Error calling tool: {str(e)}"
+
+def test_mcp_tool_simple(server_name: str, tool_name: str) -> str:
+    """Simple test function for MCP tools"""
+    manager = st.session_state.get('mcp_connection_manager')
+    if not manager:
+        return "No connection manager"
+    
+    # Test with simple arguments
+    test_args = {}
+    if tool_name == "get_current_time":
+        test_args = {"timezone": "Asia/Seoul"}
+    elif tool_name == "sequentialthinking":
+        test_args = {
+            "thought": "Testing tool",
+            "nextThoughtNeeded": False,
+            "thoughtNumber": 1,
+            "totalThoughts": 1
+        }
+    
+    logger.info(f"Testing {tool_name} on {server_name} with args: {test_args}")
+    return call_tool_sync(manager, server_name, tool_name, test_args)
 
 # --- MCP Functions ---
 async def call_mcp_tool_with_persistent_connection(manager: MCPConnectionManager, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> Any:
@@ -1176,9 +1330,19 @@ with st.sidebar:
                     tool_count = len(tools)
                     total_tools += tool_count
                     
-                    # Show tool details
+                    # Show tool details with test buttons
                     tool_names = [tool.name if hasattr(tool, 'name') else str(tool) for tool in tools]
                     st.caption(f"🖥️ **{server_name}**: {tool_count} tools - {', '.join(tool_names)}")
+                    
+                    # Add test buttons for each tool
+                    if tool_names:
+                        cols = st.columns(len(tool_names))
+                        for i, tool_name in enumerate(tool_names):
+                            with cols[i]:
+                                if st.button(f"Test {tool_name}", key=f"test_{server_name}_{tool_name}"):
+                                    with st.spinner(f"Testing {tool_name}..."):
+                                        result = test_mcp_tool_simple(server_name, tool_name)
+                                        st.text_area(f"Result from {tool_name}:", result, height=100)
             
             st.info(f"**Total: {len(connected_servers)} servers, {total_tools} tools available**")
         else:
