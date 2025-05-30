@@ -72,14 +72,14 @@ uv run streamlit run scripts/multimodal/streamlit-multimodal-chatbot.py --server
         "@modelcontextprotocol/server-memory"
       ],
         "enabled": true
-    }
+    },
     {
         "name": "notionApi",
         "command": "npx",
       "args": ["-y", "@notionhq/notion-mcp-server"],
       "env": {
-        "OPENAPI_MCP_HEADERS": "{\"Authorization\": \"Bearer ntn_****\", \"Notion-Version\": \"2022-06-28\" }"
-      }
+        "OPENAPI_MCP_HEADERS": "{\"Authorization\": \"Bearer ntn_***\", \"Notion-Version\": \"2022-06-28\" }"
+      },
         "enabled": true
     }
 ]
