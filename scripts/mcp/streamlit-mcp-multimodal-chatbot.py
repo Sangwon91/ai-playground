@@ -558,6 +558,8 @@ default_session_state_values = {
     # Add async event loop for MCP
     "_mcp_event_loop": None,
     "_mcp_thread": None,
+    # Chat reset confirmation
+    "show_reset_confirm": False,
 }
 
 for key, value in default_session_state_values.items():
@@ -893,6 +895,53 @@ with col2:
 
         st.subheader("Total Cost")
         st.metric(label="Session Cost", value=f"${st.session_state.session_total_cost:.6f}")
+
+        # Chat Reset Button
+        st.markdown("---")
+        st.subheader("🔄 Chat Controls")
+        
+        col_reset, col_confirm = st.columns([1, 1])
+        with col_reset:
+            if st.button("🗑️ Reset Chat", use_container_width=True, help="Clear chat history and statistics (keeps MCP servers)"):
+                st.session_state['show_reset_confirm'] = True
+                st.rerun()
+        
+        with col_confirm:
+            if st.session_state.get('show_reset_confirm', False):
+                if st.button("✅ Confirm", use_container_width=True, type="primary"):
+                    # Reset chat-related session state while preserving MCP configurations
+                    chat_reset_keys = [
+                        'messages',
+                        'session_total_usage', 
+                        'session_total_cost',
+                        'session_total_hypothetical_cost',
+                        'current_uploaded_files',
+                        'streaming_in_progress',
+                        'stop_streaming',
+                        '_stream_stopped_by_user_flag',
+                        '_current_stream_usage_data',
+                        '_current_stream_full_text',
+                        'prompt_submitted_this_run',
+                        'uploader_key_suffix'
+                    ]
+                    
+                    for key in chat_reset_keys:
+                        if key in default_session_state_values:
+                            st.session_state[key] = default_session_state_values[key]
+                    
+                    # Reset uploader key to clear file uploader
+                    st.session_state.uploader_key_suffix = st.session_state.get('uploader_key_suffix', 0) + 1
+                    
+                    # Hide confirmation and show success
+                    st.session_state['show_reset_confirm'] = False
+                    st.success("Chat history cleared! MCP servers preserved.")
+                    st.rerun()
+        
+        # Cancel confirmation if it's showing
+        if st.session_state.get('show_reset_confirm', False):
+            if st.button("❌ Cancel", use_container_width=True):
+                st.session_state['show_reset_confirm'] = False
+                st.rerun()
 
         st.markdown("---")
 
