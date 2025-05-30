@@ -42,3 +42,45 @@ local-ssl-proxy --source 8443 --target 8501 --cert localhost.pem --key localhost
 ```
 uv run streamlit run scripts/multimodal/streamlit-multimodal-chatbot.py --server.port 47886
 ```
+
+
+```
+[
+    {
+        "name": "sequential-thinking",
+        "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+        "enabled": true
+    },
+ {
+    "name": "filesystem",
+    "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/lsw91/Downloads"
+      ]
+ },
+    {
+        "name": "memory",
+        "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+        "enabled": true
+    }
+    {
+        "name": "notionApi",
+        "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "env": {
+        "OPENAPI_MCP_HEADERS": "{\"Authorization\": \"Bearer ntn_****\", \"Notion-Version\": \"2022-06-28\" }"
+      }
+        "enabled": true
+    }
+]
+```
