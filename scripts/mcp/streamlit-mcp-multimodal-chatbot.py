@@ -1334,15 +1334,15 @@ with st.sidebar:
                     tool_names = [tool.name if hasattr(tool, 'name') else str(tool) for tool in tools]
                     st.caption(f"🖥️ **{server_name}**: {tool_count} tools - {', '.join(tool_names)}")
                     
-                    # Add test buttons for each tool
-                    if tool_names:
-                        cols = st.columns(len(tool_names))
-                        for i, tool_name in enumerate(tool_names):
-                            with cols[i]:
-                                if st.button(f"Test {tool_name}", key=f"test_{server_name}_{tool_name}"):
-                                    with st.spinner(f"Testing {tool_name}..."):
-                                        result = test_mcp_tool_simple(server_name, tool_name)
-                                        st.text_area(f"Result from {tool_name}:", result, height=100)
+                    # # Add test buttons for each tool
+                    # if tool_names:
+                    #     cols = st.columns(len(tool_names))
+                    #     for i, tool_name in enumerate(tool_names):
+                    #         with cols[i]:
+                    #             if st.button(f"Test {tool_name}", key=f"test_{server_name}_{tool_name}"):
+                    #                 with st.spinner(f"Testing {tool_name}..."):
+                    #                     result = test_mcp_tool_simple(server_name, tool_name)
+                    #                     st.text_area(f"Result from {tool_name}:", result, height=100)
             
             st.info(f"**Total: {len(connected_servers)} servers, {total_tools} tools available**")
         else:
