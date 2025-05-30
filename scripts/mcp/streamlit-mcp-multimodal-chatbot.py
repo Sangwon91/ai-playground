@@ -376,10 +376,26 @@ async def get_anthropic_response_stream_with_mcp(
             logger.info(f"Final message received. Stop reason: {message_response.stop_reason if message_response else 'None'}")
             
         # Handle tool use if needed
-        if message_response and message_response.stop_reason == "tool_use":
-            logger.info("Tool use detected, processing tool calls")
+        # Keep processing tool uses until Claude stops requesting them
+        messages_for_next_call = api_messages_for_call
+        max_tool_iterations = 10  # Prevent infinite loops
+        tool_iteration = 0
+        
+        while message_response and message_response.stop_reason == "tool_use" and tool_iteration < max_tool_iterations:
+            tool_iteration += 1
+            logger.info(f"Tool use iteration {tool_iteration}")
+            
             # Process tool calls
             tool_results = []
+            
+            # First, yield any text content from the assistant's message before tool use
+            for content in message_response.content:
+                if content.type == "text" and hasattr(content, 'text') and content.text:
+                    logger.info(f"Yielding assistant text before tool: {content.text[:100]}...")
+                    # Don't yield if it's already been yielded
+                    if content.text not in full_response_text:
+                        yield content.text
+                        full_response_text += content.text
             
             for content in message_response.content:
                 if content.type == "tool_use":
@@ -392,7 +408,7 @@ async def get_anthropic_response_stream_with_mcp(
                         logger.info(f"Server: {server_name}, Tool: {tool_name}")
                         
                         # Show tool call info
-                        tool_info = f"\n\n🔧 Calling tool: {tool_name} on {server_name}...\n"
+                        tool_info = f"\n\n🔧 **[{tool_iteration}] Calling tool:** `{tool_name}` on `{server_name}`...\n"
                         logger.info(tool_info.strip())
                         yield tool_info
                         
@@ -406,6 +422,12 @@ async def get_anthropic_response_stream_with_mcp(
                         )
                         logger.info(f"Tool result: {result}")
                         
+                        # Display tool result in UI
+                        if result:
+                            # Format the result for better display
+                            result_display = f"\n📤 **Tool Result:**\n```\n{result}\n```\n"
+                            yield result_display
+                        
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": content.id,
@@ -413,11 +435,13 @@ async def get_anthropic_response_stream_with_mcp(
                         })
                     else:
                         logger.error(f"Invalid tool name format: {full_tool_name}")
+                        error_msg = f"Invalid tool name format: {full_tool_name}"
+                        yield f"\n❌ **Error:** {error_msg}\n"
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": content.id,
                             "is_error": True,
-                            "content": f"Invalid tool name format: {full_tool_name}"
+                            "content": error_msg
                         })
             
             # Send tool results back to Claude
@@ -440,38 +464,47 @@ async def get_anthropic_response_stream_with_mcp(
                             "input": content_item.input
                         })
                 
-                # Create a new messages list with tool results
-                messages_with_tools = api_messages_for_call + [
+                # Update messages for next call
+                messages_for_next_call = messages_for_next_call + [
                     {"role": "assistant", "content": assistant_content},
                     {"role": "user", "content": tool_results}
                 ]
                 
-                logger.info(f"Messages structure: {len(messages_with_tools)} messages")
+                logger.info(f"Messages structure: {len(messages_for_next_call)} messages")
                 
-                # Get Claude's final response
-                logger.info("Creating final stream with tool results")
+                # Get Claude's next response (might be another tool use or final answer)
+                logger.info("Creating next stream to check for more tool uses")
+                message_response = None
+                
                 async with client.messages.stream(
                     max_tokens=MAX_TOKENS_OUTPUT,
-                    messages=messages_with_tools,
+                    messages=messages_for_next_call,
                     model=MODEL_NAME,
                     tools=available_tools
-                ) as final_stream:
-                    logger.info("Final stream created, receiving response")
-                    async for text_chunk in final_stream.text_stream:
+                ) as next_stream:
+                    logger.info("Next stream created, receiving response")
+                    async for text_chunk in next_stream.text_stream:
                         if st.session_state.get("stop_streaming", False):
+                            st.session_state['_stream_stopped_by_user_flag'] = True
                             break
                         full_response_text += text_chunk
                         yield text_chunk
                     
-                    logger.info("Getting final message from final stream")
-                    final_message = await final_stream.get_final_message()
-                    st.session_state['_current_stream_usage_data'] = final_message.usage
-                    logger.info("Final response complete")
+                    logger.info("Getting message from stream")
+                    message_response = await next_stream.get_final_message()
+                    logger.info(f"Message received. Stop reason: {message_response.stop_reason if message_response else 'None'}")
+                    
+                    # Update usage data
+                    if message_response:
+                        st.session_state['_current_stream_usage_data'] = message_response.usage
             else:
                 logger.info("No tool results to send back")
-        else:
-            if message_response:
-                st.session_state['_current_stream_usage_data'] = message_response.usage
+                break
+        
+        if tool_iteration >= max_tool_iterations:
+            warning_msg = f"\n\n⚠️ Reached maximum tool iterations ({max_tool_iterations}). Stopping to prevent infinite loop.\n"
+            logger.warning(warning_msg)
+            yield warning_msg
 
         st.session_state['_current_stream_full_text'] = full_response_text
         logger.info(f"Response generation complete. Total text length: {len(full_response_text)}")
