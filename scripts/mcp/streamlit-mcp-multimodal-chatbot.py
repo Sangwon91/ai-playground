@@ -391,11 +391,11 @@ async def get_anthropic_response_stream_with_mcp(
             # First, yield any text content from the assistant's message before tool use
             for content in message_response.content:
                 if content.type == "text" and hasattr(content, 'text') and content.text:
-                    logger.info(f"Yielding assistant text before tool: {content.text[:100]}...")
-                    # Don't yield if it's already been yielded
-                    if content.text not in full_response_text:
-                        yield content.text
-                        full_response_text += content.text
+                    logger.info(f"Found assistant text before tool: {content.text[:100]}...")
+                    # Always yield the text if it's not empty, regardless of whether it's in full_response_text
+                    if content.text.strip():
+                        yield "\n\n" + content.text + "\n"
+                        full_response_text += "\n\n" + content.text + "\n"
             
             for content in message_response.content:
                 if content.type == "tool_use":
@@ -407,8 +407,18 @@ async def get_anthropic_response_stream_with_mcp(
                         server_name, tool_name = full_tool_name.split("__", 1)
                         logger.info(f"Server: {server_name}, Tool: {tool_name}")
                         
-                        # Show tool call info
-                        tool_info = f"\n\n🔧 **[{tool_iteration}] Calling tool:** `{tool_name}` on `{server_name}`...\n"
+                        # Show tool call info with arguments
+                        tool_info = f"\n\n🔧 **[{tool_iteration}] Calling tool:** `{tool_name}` on `{server_name}`\n"
+                        
+                        # Format and display tool arguments
+                        try:
+                            import json
+                            args_formatted = json.dumps(content.input, indent=2, ensure_ascii=False)
+                            tool_info += f"\n📥 **Input arguments:**\n```json\n{args_formatted}\n```\n"
+                        except:
+                            # Fallback if JSON formatting fails
+                            tool_info += f"\n📥 **Input arguments:** `{content.input}`\n"
+                        
                         logger.info(tool_info.strip())
                         yield tool_info
                         
@@ -475,6 +485,9 @@ async def get_anthropic_response_stream_with_mcp(
                 # Get Claude's next response (might be another tool use or final answer)
                 logger.info("Creating next stream to check for more tool uses")
                 message_response = None
+                
+                # Add a separator for clarity
+                yield "\n---\n"
                 
                 async with client.messages.stream(
                     max_tokens=MAX_TOKENS_OUTPUT,
