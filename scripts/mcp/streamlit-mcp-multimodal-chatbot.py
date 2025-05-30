@@ -300,22 +300,25 @@ def get_model_costs(model_name_to_check):
 
 def run_async(coro):
     """Run async function in a way compatible with Streamlit"""
+    import nest_asyncio
+    nest_asyncio.apply()
+    
     try:
-        # Check if we're already in an event loop
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Create a future and run the coroutine in the current loop
-            import nest_asyncio
-            nest_asyncio.apply()
-            task = loop.create_task(coro)
-            # Use asyncio.run_coroutine_threadsafe for thread safety
-            return loop.run_until_complete(task)
-        else:
-            # If no loop is running, create one
-            return asyncio.run(coro)
+        # Try to get the current loop
+        loop = asyncio.get_running_loop()
+        
+        # If we have a running loop, create a new thread to run the coroutine
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result(timeout=120)  # 2 minute timeout
+            
     except RuntimeError:
-        # Fallback: create new event loop
+        # No running loop, safe to use asyncio.run
         return asyncio.run(coro)
+    except Exception as e:
+        logger.error(f"Error in run_async: {e}")
+        raise
 
 # --- Helper Functions for Connection Management ---
 async def connect_mcp_servers(manager: MCPConnectionManager, configs: List[MCPServerConfig]) -> Dict[str, bool]:
@@ -341,33 +344,58 @@ async def check_all_connections_health(manager: MCPConnectionManager) -> Dict[st
         health_status[server_name] = await manager.check_connection_health(server_name)
     return health_status
 
-def run_in_thread_pool(func, *args, **kwargs):
-    """Run async function in a separate thread pool to avoid event loop conflicts"""
-    def sync_wrapper():
-        # Create a new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(func(*args, **kwargs))
-        finally:
-            loop.close()
-    
-    # Use ThreadPoolExecutor to run in separate thread
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(sync_wrapper)
-        return future.result(timeout=120)  # 2 minute total timeout
-
-async def call_mcp_tool_in_new_loop(session, tool_name: str, arguments: Dict[str, Any]) -> Any:
-    """Call MCP tool in a fresh event loop"""
+async def call_mcp_tool_simple(session, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    """Call MCP tool with simple timeout"""
     try:
+        logger.info(f"Calling MCP tool {tool_name} with args: {arguments}")
         result = await asyncio.wait_for(
             session.call_tool(tool_name, arguments),
             timeout=30.0
         )
+        logger.info(f"MCP tool call completed successfully")
         return result
-    except Exception as e:
-        logger.error(f"Tool call failed in new loop: {e}")
+    except asyncio.TimeoutError:
+        logger.error(f"MCP tool call timed out after 30 seconds")
         raise
+    except Exception as e:
+        logger.error(f"MCP tool call failed: {e}")
+        raise
+
+def call_tool_sync(manager: MCPConnectionManager, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> str:
+    """Synchronous wrapper for tool calling"""
+    try:
+        # Get connection info
+        connection_info = manager.get_connection(server_name)
+        if not connection_info:
+            return f"No active connection to server '{server_name}'"
+        
+        session, exit_stack, tools = connection_info
+        
+        # Use run_async which handles nested event loops properly
+        result = run_async(call_mcp_tool_simple(session, tool_name, arguments))
+        
+        # Extract content from result
+        if hasattr(result, 'content') and result.content:
+            content_list = result.content
+            text_parts = []
+            for content_item in content_list:
+                if hasattr(content_item, 'type') and content_item.type == 'text':
+                    if hasattr(content_item, 'text'):
+                        text_parts.append(content_item.text)
+                elif hasattr(content_item, '__dict__'):
+                    item_dict = content_item.__dict__
+                    if item_dict.get('type') == 'text':
+                        text_parts.append(item_dict.get('text', ''))
+            
+            if text_parts:
+                return '\n'.join(text_parts)
+            else:
+                return str(result)
+        else:
+            return str(result)
+    except Exception as e:
+        logger.error(f"Sync tool call failed: {e}")
+        return f"Error calling tool: {str(e)}"
 
 # --- MCP Functions ---
 async def call_mcp_tool_with_persistent_connection(manager: MCPConnectionManager, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> Any:
@@ -571,17 +599,9 @@ async def get_anthropic_response_stream_with_mcp(
                         # Call tool with persistent connection
                         logger.info(f"Calling tool with arguments: {content.input}")
                         
-                        # Use executor to run the sync thread pool function
-                        loop = asyncio.get_event_loop()
+                        # Use direct async call with run_async
                         try:
-                            result = await loop.run_in_executor(
-                                None,  # Use default executor
-                                call_tool_sync,
-                                manager,
-                                server_name,
-                                tool_name,
-                                content.input
-                            )
+                            result = call_tool_sync(manager, server_name, tool_name, content.input)
                         except Exception as tool_call_error:
                             logger.error(f"Tool call failed: {tool_call_error}")
                             result = f"Error calling tool: {str(tool_call_error)}"
@@ -1132,7 +1152,7 @@ with st.sidebar:
             with col_health:
                 if st.button("🔍 Check Health", help="Check if all connections are healthy"):
                     with st.spinner("Checking connections..."):
-                        health_results = run_in_thread_pool(check_all_connections_health, manager)
+                        health_results = run_async(check_all_connections_health(manager))
                         for server_name, is_healthy in health_results.items():
                             if is_healthy:
                                 st.success(f"✅ {server_name}: Healthy")
@@ -1142,7 +1162,7 @@ with st.sidebar:
                                 config = manager.get_config(server_name)
                                 if config:
                                     with st.spinner(f"Reconnecting {server_name}..."):
-                                        success = run_in_thread_pool(manager.connect_server, server_name)
+                                        success = run_async(manager.connect_server(server_name))
                                         if success:
                                             st.success(f"🔄 {server_name}: Reconnected")
                                         else:
@@ -1306,7 +1326,7 @@ with st.sidebar:
             
             # Disconnect servers
             if servers_to_disconnect:
-                run_in_thread_pool(disconnect_mcp_servers, manager, servers_to_disconnect)
+                run_async(disconnect_mcp_servers(manager, servers_to_disconnect))
                 st.success(f"Disconnected from {len(servers_to_disconnect)} servers")
             
             # Process new connections and auto-connect enabled servers
@@ -1328,7 +1348,7 @@ with st.sidebar:
             
             # Connect to servers
             if servers_to_connect:
-                connection_results = run_in_thread_pool(connect_mcp_servers, manager, servers_to_connect)
+                connection_results = run_async(connect_mcp_servers(manager, servers_to_connect))
                 
                 # Update display state based on connection results
                 for config in servers_to_connect:
@@ -1349,40 +1369,4 @@ with st.sidebar:
 
 # Reset prompt submission flag
 if not st.session_state.get("prompt_submitted_this_run", False) and not prompt:
-    st.session_state['prompt_submitted_this_run'] = False
-
-def call_tool_sync(manager: MCPConnectionManager, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> str:
-    """Synchronous wrapper for tool calling using thread pool"""
-    try:
-        # Get connection info
-        connection_info = manager.get_connection(server_name)
-        if not connection_info:
-            return f"No active connection to server '{server_name}'"
-        
-        session, exit_stack, tools = connection_info
-        
-        # Call tool in thread pool
-        result = run_in_thread_pool(call_mcp_tool_in_new_loop, session, tool_name, arguments)
-        
-        # Extract content from result
-        if hasattr(result, 'content') and result.content:
-            content_list = result.content
-            text_parts = []
-            for content_item in content_list:
-                if hasattr(content_item, 'type') and content_item.type == 'text':
-                    if hasattr(content_item, 'text'):
-                        text_parts.append(content_item.text)
-                elif hasattr(content_item, '__dict__'):
-                    item_dict = content_item.__dict__
-                    if item_dict.get('type') == 'text':
-                        text_parts.append(item_dict.get('text', ''))
-            
-            if text_parts:
-                return '\n'.join(text_parts)
-            else:
-                return str(result)
-        else:
-            return str(result)
-    except Exception as e:
-        logger.error(f"Sync tool call failed: {e}")
-        return f"Error calling tool: {str(e)}" 
+    st.session_state['prompt_submitted_this_run'] = False 
