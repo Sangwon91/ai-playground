@@ -14,7 +14,7 @@
 
 1. 필요한 패키지 설치:
 ```bash
-pip install streamlit anthropic mcp python-dotenv
+pip install streamlit anthropic mcp python-dotenv nest-asyncio
 ```
 
 2. MCP 서버를 위한 `uv` 설치 (uvx 명령어 사용을 위해):
