@@ -94,25 +94,75 @@ class MCPServerConfig:
             enabled=data.get("enabled", True)
         )
 
-@dataclass
-class MCPConnection:
-    """Active MCP connection"""
-    config: MCPServerConfig
-    session: ClientSession
-    exit_stack: AsyncExitStack
-    tools: List[Any] = field(default_factory=list)
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+# --- MCP Connection Manager ---
+class MCPConnectionManager:
+    """Manages MCP server configurations and creates connections on demand"""
     
-    async def cleanup(self):
-        """Safely cleanup the connection"""
-        with self._lock:
-            if self.exit_stack:
-                try:
-                    await self.exit_stack.aclose()
-                except Exception:
-                    pass  # Ignore cleanup errors
-                finally:
-                    self.exit_stack = None
+    def __init__(self):
+        self.configs = {}
+        self.lock = threading.Lock()
+    
+    def add_config(self, server_name: str, config: MCPServerConfig):
+        """Add or update server configuration"""
+        with self.lock:
+            self.configs[server_name] = config
+    
+    def remove_config(self, server_name: str):
+        """Remove server configuration"""
+        with self.lock:
+            self.configs.pop(server_name, None)
+    
+    def get_config(self, server_name: str) -> Optional[MCPServerConfig]:
+        """Get server configuration"""
+        with self.lock:
+            return self.configs.get(server_name)
+    
+    def get_all_configs(self) -> Dict[str, MCPServerConfig]:
+        """Get all server configurations"""
+        with self.lock:
+            return self.configs.copy()
+    
+    async def create_temporary_connection(self, server_name: str) -> Optional[Tuple[ClientSession, AsyncExitStack, List[Any]]]:
+        """Create a temporary connection for a single request"""
+        config = self.get_config(server_name)
+        if not config or not config.enabled:
+            return None
+        
+        logger.info(f"Creating temporary connection for {server_name}")
+        exit_stack = AsyncExitStack()
+        
+        try:
+            server_params = StdioServerParameters(
+                command=config.command,
+                args=config.args,
+                env=config.env
+            )
+            
+            # Start MCP server
+            stdio_transport = await exit_stack.enter_async_context(
+                stdio_client(server_params)
+            )
+            stdio_read, stdio_write = stdio_transport
+            
+            # Create session
+            session = await exit_stack.enter_async_context(
+                ClientSession(stdio_read, stdio_write)
+            )
+            
+            # Initialize session
+            await session.initialize()
+            
+            # Get tools
+            tools_response = await session.list_tools()
+            tools = tools_response.tools if hasattr(tools_response, 'tools') else []
+            
+            logger.info(f"Temporary connection created for {server_name} with {len(tools)} tools")
+            return session, exit_stack, tools
+            
+        except Exception as e:
+            logger.error(f"Failed to create temporary connection for {server_name}: {e}")
+            await exit_stack.aclose()
+            return None
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -156,136 +206,87 @@ def run_async(coro):
         return asyncio.run(coro)
 
 # --- MCP Functions ---
-async def connect_mcp_server(config: MCPServerConfig) -> Optional[MCPConnection]:
-    """Connect to an MCP server"""
-    logger.info(f"Attempting to connect to MCP server: {config.name}")
-    try:
-        server_params = StdioServerParameters(
-            command=config.command,
-            args=config.args,
-            env=config.env
-        )
-        
-        exit_stack = AsyncExitStack()
-        
-        try:
-            logger.info(f"Starting stdio client for {config.name}")
-            stdio_transport = await exit_stack.enter_async_context(
-                stdio_client(server_params)
-            )
-            stdio_read, stdio_write = stdio_transport
-        except FileNotFoundError:
-            logger.error(f"Command '{config.command}' not found for {config.name}")
-            st.error(f"Command '{config.command}' not found. Please ensure it's installed and in PATH.")
-            await exit_stack.aclose()
-            return None
-        except Exception as e:
-            logger.error(f"Failed to start MCP server '{config.name}': {str(e)}")
-            st.error(f"Failed to start MCP server '{config.name}': {str(e)}")
-            await exit_stack.aclose()
-            return None
-        
-        try:
-            logger.info(f"Creating client session for {config.name}")
-            session = await exit_stack.enter_async_context(
-                ClientSession(stdio_read, stdio_write)
-            )
-            
-            logger.info(f"Initializing session for {config.name}")
-            await session.initialize()
-            
-            # Get available tools
-            logger.info(f"Listing tools for {config.name}")
-            tools_response = await session.list_tools()
-            tools = tools_response.tools if hasattr(tools_response, 'tools') else []
-            logger.info(f"Found {len(tools)} tools for {config.name}")
-            
-            return MCPConnection(
-                config=config,
-                session=session,
-                exit_stack=exit_stack,
-                tools=tools
-            )
-        except Exception as e:
-            logger.error(f"Failed to initialize session with MCP server '{config.name}': {str(e)}")
-            st.error(f"Failed to initialize session with MCP server '{config.name}': {str(e)}")
-            await exit_stack.aclose()
-            return None
-            
-    except Exception as e:
-        logger.error(f"Unexpected error connecting to MCP server '{config.name}': {str(e)}")
-        st.error(f"Unexpected error connecting to MCP server '{config.name}': {str(e)}")
-        return None
-
-async def disconnect_mcp_server(connection: MCPConnection):
-    """Disconnect from an MCP server"""
-    try:
-        await connection.cleanup()
-    except Exception as e:
-        # Log but don't show error for expected async cleanup issues
-        if "different task" not in str(e):
-            st.error(f"Error disconnecting from MCP server '{connection.config.name}': {e}")
-
-async def call_mcp_tool(connection: MCPConnection, tool_name: str, arguments: Dict[str, Any]) -> Any:
-    """Call a tool on an MCP server"""
-    logger.info(f"call_mcp_tool: Calling {tool_name} with args: {arguments}")
-    logger.info(f"call_mcp_tool: Connection valid: {connection is not None}")
-    logger.info(f"call_mcp_tool: Session valid: {connection.session is not None if connection else 'N/A'}")
+async def call_mcp_tool_with_new_connection(manager: MCPConnectionManager, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    """Call a tool on an MCP server using a fresh connection"""
+    logger.info(f"Calling tool {tool_name} on server {server_name}")
+    
+    # Create temporary connection
+    connection_info = await manager.create_temporary_connection(server_name)
+    if not connection_info:
+        error_msg = f"Failed to create connection to server '{server_name}'"
+        logger.error(error_msg)
+        return error_msg
+    
+    session, exit_stack, _ = connection_info
     
     try:
-        if not connection or not connection.session:
-            error_msg = f"Invalid connection or session for tool '{tool_name}'"
-            logger.error(f"call_mcp_tool: {error_msg}")
-            return error_msg
-            
-        # Add timeout for tool calls
-        logger.info(f"call_mcp_tool: About to call session.call_tool")
+        # Call the tool
+        logger.info(f"Executing tool call: {tool_name} with args: {arguments}")
         result = await asyncio.wait_for(
-            connection.session.call_tool(tool_name, arguments),
-            timeout=30.0  # 30 second timeout
+            session.call_tool(tool_name, arguments),
+            timeout=30.0
         )
-        logger.info(f"call_mcp_tool: Raw result type: {type(result)}")
         
         # Extract content from result
         if hasattr(result, 'content'):
             content_list = result.content
-            logger.info(f"call_mcp_tool: Found content list with {len(content_list)} items")
-            # Concatenate all text content
             text_parts = []
             for content_item in content_list:
                 if hasattr(content_item, 'type') and content_item.type == 'text':
                     if hasattr(content_item, 'text'):
                         text_parts.append(content_item.text)
-                        logger.info(f"call_mcp_tool: Added text content: {content_item.text[:100]}...")
                 elif hasattr(content_item, '__dict__') and content_item.__dict__.get('type') == 'text':
                     text_parts.append(content_item.__dict__.get('text', ''))
             
             if text_parts:
                 final_result = '\n'.join(text_parts)
-                logger.info(f"call_mcp_tool: Returning combined text: {final_result[:100]}...")
+                logger.info(f"Tool call successful: {final_result[:100]}...")
                 return final_result
             else:
-                logger.info(f"call_mcp_tool: No text parts found, returning str(result)")
                 return str(result)
         else:
-            logger.info(f"call_mcp_tool: No content attribute, returning str(result)")
             return str(result)
+            
     except asyncio.TimeoutError:
         error_msg = f"Timeout calling tool '{tool_name}' (exceeded 30 seconds)"
-        logger.error(f"call_mcp_tool: {error_msg}")
-        st.error(error_msg)
+        logger.error(error_msg)
         return error_msg
     except Exception as e:
         error_msg = f"Error calling tool '{tool_name}': {str(e)}"
-        logger.error(f"call_mcp_tool: {error_msg}", exc_info=True)
-        st.error(error_msg)
+        logger.error(error_msg, exc_info=True)
         return error_msg
+    finally:
+        # Always cleanup the connection
+        try:
+            await exit_stack.aclose()
+        except Exception as e:
+            logger.warning(f"Error closing connection: {e}")
 
-def format_mcp_tools_for_claude(connections: Dict[str, MCPConnection]) -> List[Dict[str, Any]]:
+async def get_available_tools(manager: MCPConnectionManager) -> Dict[str, List[Any]]:
+    """Get all available tools from enabled servers"""
+    tools_by_server = {}
+    
+    for server_name, config in manager.get_all_configs().items():
+        if not config.enabled:
+            continue
+            
+        try:
+            connection_info = await manager.create_temporary_connection(server_name)
+            if connection_info:
+                session, exit_stack, tools = connection_info
+                tools_by_server[server_name] = tools
+                # Cleanup connection immediately
+                await exit_stack.aclose()
+        except Exception as e:
+            logger.error(f"Error getting tools from {server_name}: {e}")
+    
+    return tools_by_server
+
+def format_tools_for_claude(tools_by_server: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
     """Format MCP tools for Claude API"""
     tools = []
-    for server_name, connection in connections.items():
-        for tool in connection.tools:
+    for server_name, server_tools in tools_by_server.items():
+        for tool in server_tools:
             # Extract the actual schema - handle different attribute names
             input_schema = None
             if hasattr(tool, 'inputSchema'):
@@ -329,7 +330,7 @@ def format_mcp_tools_for_claude(connections: Dict[str, MCPConnection]) -> List[D
 # --- Core API Interaction Function ---
 async def get_anthropic_response_stream_with_mcp(
     api_messages_for_call: list,
-    mcp_connections_dict: Dict[str, Any]  # Changed parameter name for clarity
+    mcp_connections_dict: Dict[str, Any]  # Still accept old format for compatibility
 ):
     """Enhanced response function that handles MCP tool calls"""
     logger.info("Starting enhanced response function with MCP support")
@@ -339,30 +340,16 @@ async def get_anthropic_response_stream_with_mcp(
     st.session_state['streaming_in_progress'] = True
     st.session_state['_stream_stopped_by_user_flag'] = False
 
-    # Establish actual MCP connections if needed
-    active_connections = {}
-    for server_name, conn_info in mcp_connections_dict.items():
-        if isinstance(conn_info, dict) and conn_info.get('status') == 'pending':
-            # Need to connect
-            logger.info(f"Establishing connection to {server_name}")
-            try:
-                connection = await connect_mcp_server(conn_info['config'])
-                if connection:
-                    active_connections[server_name] = connection
-                    conn_info['connection'] = connection
-                    conn_info['status'] = 'connected'
-            except Exception as e:
-                logger.error(f"Failed to connect to {server_name}: {e}")
-        elif isinstance(conn_info, MCPConnection):
-            # Already connected (old format)
-            active_connections[server_name] = conn_info
-        elif isinstance(conn_info, dict) and conn_info.get('connection'):
-            # Already connected (new format)
-            active_connections[server_name] = conn_info['connection']
+    # Get connection manager
+    manager = st.session_state.get('mcp_connection_manager')
+    if not manager:
+        manager = MCPConnectionManager()
+        st.session_state.mcp_connection_manager = manager
     
-    # Format MCP tools for Claude
-    available_tools = format_mcp_tools_for_claude(active_connections)
-    logger.info(f"Formatted {len(available_tools)} tools for Claude")
+    # Get available tools
+    tools_by_server = await get_available_tools(manager)
+    available_tools = format_tools_for_claude(tools_by_server)
+    logger.info(f"Found {len(available_tools)} tools from {len(tools_by_server)} servers")
 
     try:
         # First, get Claude's response with tools
@@ -404,33 +391,26 @@ async def get_anthropic_response_stream_with_mcp(
                         server_name, tool_name = full_tool_name.split("__", 1)
                         logger.info(f"Server: {server_name}, Tool: {tool_name}")
                         
-                        if server_name in active_connections:
-                            # Show tool call info
-                            tool_info = f"\n\n🔧 Calling tool: {tool_name} on {server_name}...\n"
-                            logger.info(tool_info.strip())
-                            yield tool_info
-                            
-                            logger.info(f"Calling tool with arguments: {content.input}")
-                            result = await call_mcp_tool(
-                                active_connections[server_name],
-                                tool_name,
-                                content.input
-                            )
-                            logger.info(f"Tool result: {result}")
-                            
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": content.id,
-                                "content": result
-                            })
-                        else:
-                            logger.warning(f"Server '{server_name}' not connected")
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": content.id,
-                                "is_error": True,
-                                "content": f"Server '{server_name}' not connected"
-                            })
+                        # Show tool call info
+                        tool_info = f"\n\n🔧 Calling tool: {tool_name} on {server_name}...\n"
+                        logger.info(tool_info.strip())
+                        yield tool_info
+                        
+                        # Call tool with fresh connection
+                        logger.info(f"Calling tool with arguments: {content.input}")
+                        result = await call_mcp_tool_with_new_connection(
+                            manager, 
+                            server_name, 
+                            tool_name, 
+                            content.input
+                        )
+                        logger.info(f"Tool result: {result}")
+                        
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": content.id,
+                            "content": result
+                        })
                     else:
                         logger.error(f"Invalid tool name format: {full_tool_name}")
                         tool_results.append({
@@ -467,8 +447,6 @@ async def get_anthropic_response_stream_with_mcp(
                 ]
                 
                 logger.info(f"Messages structure: {len(messages_with_tools)} messages")
-                logger.info(f"Last assistant message: {messages_with_tools[-2]['content']}")
-                logger.info(f"Tool results message: {messages_with_tools[-1]['content']}")
                 
                 # Get Claude's final response
                 logger.info("Creating final stream with tool results")
@@ -540,21 +518,18 @@ for key, value in default_session_state_values.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
+# Initialize connection manager
+if 'mcp_connection_manager' not in st.session_state:
+    st.session_state.mcp_connection_manager = MCPConnectionManager()
+
 # Cleanup function for app shutdown
 def cleanup_connections():
     """Cleanup all MCP connections on app shutdown"""
-    async def cleanup_all():
-        for connection in st.session_state.get('mcp_connections', {}).values():
-            try:
-                await connection.cleanup()
-            except Exception:
-                pass  # Ignore cleanup errors
-    
-    if st.session_state.get('mcp_connections'):
-        try:
-            run_async(cleanup_all())
-        except Exception:
-            pass  # Ignore cleanup errors
+    manager = st.session_state.get('mcp_connection_manager')
+    if manager and hasattr(manager, 'configs'):
+        # Synchronous cleanup for atexit
+        for server_name in list(manager.configs.keys()):
+            manager.configs.pop(server_name, None)
 
 # Register cleanup handler
 import atexit
@@ -744,20 +719,32 @@ with col1:
         # Prepare API messages
         api_messages_to_send = []
         for msg_data in st.session_state.messages:
-            api_messages_to_send.append({
+            # Create a deep copy of the message to avoid modifying the original
+            msg_copy = {
                 "role": msg_data["role"],
-                "content": msg_data["content"]
-            })
+                "content": []
+            }
+            
+            # Copy content while removing any existing cache_control
+            if isinstance(msg_data["content"], list):
+                for content_item in msg_data["content"]:
+                    if isinstance(content_item, dict):
+                        # Create a copy without cache_control
+                        item_copy = {k: v for k, v in content_item.items() if k != "cache_control"}
+                        msg_copy["content"].append(item_copy)
+                    else:
+                        msg_copy["content"].append(content_item)
+            else:
+                msg_copy["content"] = msg_data["content"]
+            
+            api_messages_to_send.append(msg_copy)
 
-        # Add cache control
+        # Add cache control ONLY to the last content of the last message
         if api_messages_to_send:
             last_message = api_messages_to_send[-1]
             if "content" in last_message and isinstance(last_message["content"], list) and last_message["content"]:
-                last_content_element = last_message["content"][-1]
-                if isinstance(last_content_element, dict):
-                    last_content_copy = last_content_element.copy()
-                    last_content_copy["cache_control"] = {"type": "ephemeral"}
-                    last_message["content"][-1] = last_content_copy
+                # Add cache_control to the last content element
+                last_message["content"][-1]["cache_control"] = {"type": "ephemeral"}
 
         # Call API with MCP support
         st.session_state['streaming_in_progress'] = True
@@ -969,35 +956,14 @@ with col2:
                             st.rerun()
                     
                     # Show connection status
-                    connection_info = st.session_state['mcp_connections'].get(config.name)
-                    if connection_info:
-                        if isinstance(connection_info, dict):
-                            status = connection_info.get('status', 'unknown')
-                            if status == 'connected':
-                                st.success("✅ Connected")
-                                connection = connection_info.get('connection')
-                                if connection and hasattr(connection, 'tools'):
-                                    if connection.tools:
-                                        st.caption(f"Available tools: {len(connection.tools)}")
-                                        for tool in connection.tools[:3]:  # Show first 3 tools
-                                            st.caption(f"• {tool.name}")
-                                        if len(connection.tools) > 3:
-                                            st.caption(f"... and {len(connection.tools) - 3} more")
-                            elif status == 'pending':
-                                st.info("⏳ Pending connection")
-                            else:
-                                st.warning("❓ Unknown status")
+                    manager = st.session_state.get('mcp_connection_manager')
+                    if manager and config.name in manager.configs:
+                        if config.enabled:
+                            st.success("✅ Enabled (connections created on demand)")
                         else:
-                            # Old format - MCPConnection object
-                            st.success("✅ Connected")
-                            if hasattr(connection_info, 'tools') and connection_info.tools:
-                                st.caption(f"Available tools: {len(connection_info.tools)}")
-                                for tool in connection_info.tools[:3]:  # Show first 3 tools
-                                    st.caption(f"• {tool.name}")
-                                if len(connection_info.tools) > 3:
-                                    st.caption(f"... and {len(connection_info.tools) - 3} more")
+                            st.warning("⏸️ Disabled")
                     else:
-                        st.info("⭕ Not connected")
+                        st.info("⭕ Not configured")
                     
                     # Show configuration
                     st.caption(f"Command: `{config.command}`")
@@ -1008,36 +974,38 @@ with col2:
 
         # Apply connections button
         if st.button("🔄 Apply Changes", use_container_width=True):
-            # Instead of using run_async, we'll create connections synchronously
-            # but ensure they're used in the same context later
+            # Get or create connection manager
+            manager = st.session_state.get('mcp_connection_manager')
+            if not manager:
+                manager = MCPConnectionManager()
+                st.session_state.mcp_connection_manager = manager
             
             # Process disconnections
             for server_name in st.session_state['mcp_pending_disconnections']:
+                manager.remove_config(server_name)
+                # Remove from the display list
                 if server_name in st.session_state['mcp_connections']:
-                    with st.spinner(f"Disconnecting {server_name}..."):
-                        # Just remove from dict, cleanup will happen automatically
-                        del st.session_state['mcp_connections'][server_name]
+                    del st.session_state['mcp_connections'][server_name]
             
             # Process new connections and auto-connect enabled servers
-            servers_to_connect = []
+            servers_to_add = []
             
             # Add pending connections
             for config in st.session_state['mcp_pending_connections']:
-                if config.name not in st.session_state['mcp_connections']:
-                    servers_to_connect.append(config)
+                servers_to_add.append(config)
             
             # Add auto-connect servers
             for config in st.session_state['mcp_server_configs']:
-                if config.enabled and config.name not in st.session_state['mcp_connections']:
-                    servers_to_connect.append(config)
+                if config.enabled and config.name not in [s.name for s in servers_to_add]:
+                    servers_to_add.append(config)
             
-            # Mark servers for connection (actual connection will happen during use)
-            for config in servers_to_connect:
-                # Store config for lazy connection
+            # Add servers to manager
+            for config in servers_to_add:
+                manager.add_config(config.name, config)
+                # Update display state
                 st.session_state['mcp_connections'][config.name] = {
                     'config': config,
-                    'connection': None,
-                    'status': 'pending'
+                    'status': 'managed'
                 }
             
             # Clear pending lists
