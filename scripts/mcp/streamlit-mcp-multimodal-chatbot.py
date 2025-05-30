@@ -44,13 +44,15 @@ from mcp.client.stdio import stdio_client
 load_dotenv()
 
 # --- Configuration & Constants ---
-DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
-MODEL_NAME = os.getenv("ANTHROPIC_MODEL", DEFAULT_MODEL)
+# DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
+DEFAULT_MODEL = "claude-sonnet-4-20250514"
+MODEL_NAME = DEFAULT_MODEL
+# MODEL_NAME = os.getenv("ANTHROPIC_MODEL", DEFAULT_MODEL)
 MAX_TOKENS_OUTPUT = 4096
 
 # Model costs
 COSTS_PER_MILLION_TOKENS = {
-    "claude-3-5-sonnet-20241022": {
+    "claude-sonnet-4-20250514": {
         "input_tokens": 3.00,
         "output_tokens": 15.00,
         "cache_creation_input_tokens": 3.75,
@@ -96,10 +98,11 @@ class MCPServerConfig:
 
 # --- MCP Connection Manager ---
 class MCPConnectionManager:
-    """Manages MCP server configurations and creates connections on demand"""
+    """Manages persistent MCP server connections"""
     
     def __init__(self):
         self.configs = {}
+        self.connections = {}  # Store active connections: {server_name: (session, exit_stack, tools)}
         self.lock = threading.Lock()
     
     def add_config(self, server_name: str, config: MCPServerConfig):
@@ -122,13 +125,29 @@ class MCPConnectionManager:
         with self.lock:
             return self.configs.copy()
     
-    async def create_temporary_connection(self, server_name: str) -> Optional[Tuple[ClientSession, AsyncExitStack, List[Any]]]:
-        """Create a temporary connection for a single request"""
+    async def connect_server(self, server_name: str) -> bool:
+        """Create persistent connection for a server"""
         config = self.get_config(server_name)
         if not config or not config.enabled:
-            return None
+            logger.warning(f"Cannot connect {server_name}: config not found or disabled")
+            return False
         
-        logger.info(f"Creating temporary connection for {server_name}")
+        # Check if already connected
+        if server_name in self.connections:
+            logger.info(f"Server {server_name} already connected, checking health...")
+            # Test connection health
+            try:
+                session, exit_stack, tools = self.connections[server_name]
+                # Try to list tools to verify connection is still active
+                tools_response = await asyncio.wait_for(session.list_tools(), timeout=10.0)
+                logger.info(f"Connection to {server_name} is healthy")
+                return True
+            except Exception as e:
+                logger.warning(f"Connection to {server_name} appears unhealthy: {e}")
+                # Remove unhealthy connection and reconnect
+                await self.disconnect_server(server_name)
+        
+        logger.info(f"Connecting to MCP server: {server_name}")
         exit_stack = AsyncExitStack()
         
         try:
@@ -138,31 +157,108 @@ class MCPConnectionManager:
                 env=config.env
             )
             
-            # Start MCP server
-            stdio_transport = await exit_stack.enter_async_context(
-                stdio_client(server_params)
+            # Start MCP server with timeout
+            logger.info(f"Starting server process: {config.command} {' '.join(config.args)}")
+            stdio_transport = await asyncio.wait_for(
+                exit_stack.enter_async_context(stdio_client(server_params)),
+                timeout=30.0
             )
             stdio_read, stdio_write = stdio_transport
             
-            # Create session
-            session = await exit_stack.enter_async_context(
-                ClientSession(stdio_read, stdio_write)
+            # Create session with timeout
+            logger.info(f"Creating session for {server_name}")
+            session = await asyncio.wait_for(
+                exit_stack.enter_async_context(ClientSession(stdio_read, stdio_write)),
+                timeout=10.0
             )
             
-            # Initialize session
-            await session.initialize()
+            # Initialize session with timeout
+            logger.info(f"Initializing session for {server_name}")
+            await asyncio.wait_for(session.initialize(), timeout=10.0)
             
-            # Get tools
-            tools_response = await session.list_tools()
+            # Get tools with timeout
+            logger.info(f"Getting tools for {server_name}")
+            tools_response = await asyncio.wait_for(session.list_tools(), timeout=10.0)
             tools = tools_response.tools if hasattr(tools_response, 'tools') else []
             
-            logger.info(f"Temporary connection created for {server_name} with {len(tools)} tools")
-            return session, exit_stack, tools
+            # Store connection
+            with self.lock:
+                self.connections[server_name] = (session, exit_stack, tools)
             
-        except Exception as e:
-            logger.error(f"Failed to create temporary connection for {server_name}: {e}")
+            logger.info(f"Successfully connected to {server_name} with {len(tools)} tools")
+            
+            # Log available tools for debugging
+            tool_names = [tool.name if hasattr(tool, 'name') else str(tool) for tool in tools]
+            logger.info(f"Available tools for {server_name}: {tool_names}")
+            
+            return True
+            
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout connecting to {server_name}")
             await exit_stack.aclose()
-            return None
+            return False
+        except Exception as e:
+            logger.error(f"Failed to connect to {server_name}: {e}")
+            await exit_stack.aclose()
+            return False
+    
+    async def check_connection_health(self, server_name: str) -> bool:
+        """Check if a connection is still healthy"""
+        connection_info = self.get_connection(server_name)
+        if not connection_info:
+            return False
+        
+        session, exit_stack, tools = connection_info
+        try:
+            # Try to list tools to verify connection
+            await asyncio.wait_for(session.list_tools(), timeout=5.0)
+            return True
+        except Exception as e:
+            logger.warning(f"Health check failed for {server_name}: {e}")
+            return False
+    
+    async def disconnect_server(self, server_name: str):
+        """Disconnect from a server"""
+        with self.lock:
+            if server_name in self.connections:
+                session, exit_stack, tools = self.connections.pop(server_name)
+                logger.info(f"Disconnecting from {server_name}")
+                try:
+                    await exit_stack.aclose()
+                    logger.info(f"Successfully disconnected from {server_name}")
+                except Exception as e:
+                    logger.error(f"Error disconnecting from {server_name}: {e}")
+    
+    async def disconnect_all(self):
+        """Disconnect from all servers"""
+        server_names = list(self.connections.keys())
+        for server_name in server_names:
+            await self.disconnect_server(server_name)
+    
+    def get_connection(self, server_name: str) -> Optional[Tuple[Any, Any, List[Any]]]:
+        """Get existing connection for a server"""
+        with self.lock:
+            return self.connections.get(server_name)
+    
+    def get_all_tools(self) -> Dict[str, List[Any]]:
+        """Get all tools from connected servers"""
+        tools_by_server = {}
+        with self.lock:
+            for server_name, (session, exit_stack, tools) in self.connections.items():
+                config = self.configs.get(server_name)
+                if config and config.enabled:
+                    tools_by_server[server_name] = tools
+        return tools_by_server
+    
+    def is_connected(self, server_name: str) -> bool:
+        """Check if server is connected"""
+        with self.lock:
+            return server_name in self.connections
+    
+    def get_connected_servers(self) -> List[str]:
+        """Get list of connected server names"""
+        with self.lock:
+            return list(self.connections.keys())
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -205,82 +301,156 @@ def run_async(coro):
         # Fallback: create new event loop
         return asyncio.run(coro)
 
+# --- Helper Functions for Connection Management ---
+async def connect_mcp_servers(manager: MCPConnectionManager, configs: List[MCPServerConfig]) -> Dict[str, bool]:
+    """Connect to multiple MCP servers"""
+    results = {}
+    for config in configs:
+        if config.enabled:
+            success = await manager.connect_server(config.name)
+            results[config.name] = success
+        else:
+            results[config.name] = False
+    return results
+
+async def disconnect_mcp_servers(manager: MCPConnectionManager, server_names: List[str]):
+    """Disconnect from multiple MCP servers"""
+    for server_name in server_names:
+        await manager.disconnect_server(server_name)
+
+async def check_all_connections_health(manager: MCPConnectionManager) -> Dict[str, bool]:
+    """Check health of all connections"""
+    health_status = {}
+    for server_name in manager.get_connected_servers():
+        health_status[server_name] = await manager.check_connection_health(server_name)
+    return health_status
+
 # --- MCP Functions ---
-async def call_mcp_tool_with_new_connection(manager: MCPConnectionManager, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> Any:
-    """Call a tool on an MCP server using a fresh connection"""
+async def call_mcp_tool_with_persistent_connection(manager: MCPConnectionManager, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    """Call a tool on an MCP server using persistent connection"""
     logger.info(f"Calling tool {tool_name} on server {server_name}")
     
-    # Create temporary connection
-    connection_info = await manager.create_temporary_connection(server_name)
+    # Get existing connection
+    connection_info = manager.get_connection(server_name)
     if not connection_info:
-        error_msg = f"Failed to create connection to server '{server_name}'"
+        error_msg = f"No active connection to server '{server_name}'. Please ensure the server is connected."
         logger.error(error_msg)
         return error_msg
     
-    session, exit_stack, _ = connection_info
+    session, exit_stack, tools = connection_info
+    
+    # Validate that the tool exists
+    available_tool_names = [tool.name if hasattr(tool, 'name') else str(tool) for tool in tools]
+    if tool_name not in available_tool_names:
+        error_msg = f"Tool '{tool_name}' not found in server '{server_name}'. Available tools: {available_tool_names}"
+        logger.error(error_msg)
+        return error_msg
     
     try:
-        # Call the tool
+        # Check if session is still active by testing a simple operation
+        logger.info(f"Validating connection to {server_name}")
+        
+        # Call the tool with increased timeout
         logger.info(f"Executing tool call: {tool_name} with args: {arguments}")
+        
+        # Increase timeout to 60 seconds for potentially slow operations
         result = await asyncio.wait_for(
             session.call_tool(tool_name, arguments),
-            timeout=30.0
+            timeout=60.0
         )
         
         # Extract content from result
-        if hasattr(result, 'content'):
+        if hasattr(result, 'content') and result.content:
             content_list = result.content
             text_parts = []
             for content_item in content_list:
                 if hasattr(content_item, 'type') and content_item.type == 'text':
                     if hasattr(content_item, 'text'):
                         text_parts.append(content_item.text)
-                elif hasattr(content_item, '__dict__') and content_item.__dict__.get('type') == 'text':
-                    text_parts.append(content_item.__dict__.get('text', ''))
+                elif hasattr(content_item, '__dict__'):
+                    item_dict = content_item.__dict__
+                    if item_dict.get('type') == 'text':
+                        text_parts.append(item_dict.get('text', ''))
             
             if text_parts:
                 final_result = '\n'.join(text_parts)
                 logger.info(f"Tool call successful: {final_result[:100]}...")
                 return final_result
             else:
-                return str(result)
+                # If no text content, return the raw result
+                result_str = str(result)
+                logger.info(f"Tool call returned non-text result: {result_str[:100]}...")
+                return result_str
         else:
-            return str(result)
+            # No content attribute or empty content
+            result_str = str(result)
+            logger.info(f"Tool call returned result without content: {result_str[:100]}...")
+            return result_str
             
     except asyncio.TimeoutError:
-        error_msg = f"Timeout calling tool '{tool_name}' (exceeded 30 seconds)"
+        error_msg = f"Timeout calling tool '{tool_name}' on server '{server_name}' (exceeded 60 seconds)"
         logger.error(error_msg)
+        
+        # Try to reconnect the server for next time
+        logger.info(f"Attempting to reconnect {server_name} due to timeout...")
+        try:
+            await manager.disconnect_server(server_name)
+            config = manager.get_config(server_name)
+            if config:
+                await manager.connect_server(server_name)
+                logger.info(f"Successfully reconnected to {server_name}")
+        except Exception as reconnect_error:
+            logger.error(f"Failed to reconnect to {server_name}: {reconnect_error}")
+        
         return error_msg
     except Exception as e:
-        error_msg = f"Error calling tool '{tool_name}': {str(e)}"
+        error_msg = f"Error calling tool '{tool_name}' on server '{server_name}': {str(e)}"
         logger.error(error_msg, exc_info=True)
+        
+        # Check if it's a connection issue and try to reconnect
+        if "connection" in str(e).lower() or "closed" in str(e).lower():
+            logger.info(f"Detected connection issue with {server_name}, attempting to reconnect...")
+            try:
+                await manager.disconnect_server(server_name)
+                config = manager.get_config(server_name)
+                if config:
+                    reconnect_success = await manager.connect_server(server_name)
+                    if reconnect_success:
+                        logger.info(f"Successfully reconnected to {server_name}")
+                        # Get the new session after reconnection
+                        new_connection_info = manager.get_connection(server_name)
+                        if new_connection_info:
+                            new_session, _, _ = new_connection_info
+                            # Retry the tool call once with new session
+                            logger.info(f"Retrying tool call: {tool_name}")
+                            retry_result = await asyncio.wait_for(
+                                new_session.call_tool(tool_name, arguments),
+                                timeout=60.0
+                            )
+                            
+                            # Process retry result same way as original
+                            if hasattr(retry_result, 'content') and retry_result.content:
+                                content_list = retry_result.content
+                                text_parts = []
+                                for content_item in content_list:
+                                    if hasattr(content_item, 'type') and content_item.type == 'text':
+                                        if hasattr(content_item, 'text'):
+                                            text_parts.append(content_item.text)
+                                
+                                if text_parts:
+                                    final_result = '\n'.join(text_parts)
+                                    logger.info(f"Retry successful: {final_result[:100]}...")
+                                    return final_result
+                            
+                            return str(retry_result)
+            except Exception as reconnect_error:
+                logger.error(f"Failed to reconnect and retry: {reconnect_error}")
+        
         return error_msg
-    finally:
-        # Always cleanup the connection
-        try:
-            await exit_stack.aclose()
-        except Exception as e:
-            logger.warning(f"Error closing connection: {e}")
 
 async def get_available_tools(manager: MCPConnectionManager) -> Dict[str, List[Any]]:
-    """Get all available tools from enabled servers"""
-    tools_by_server = {}
-    
-    for server_name, config in manager.get_all_configs().items():
-        if not config.enabled:
-            continue
-            
-        try:
-            connection_info = await manager.create_temporary_connection(server_name)
-            if connection_info:
-                session, exit_stack, tools = connection_info
-                tools_by_server[server_name] = tools
-                # Cleanup connection immediately
-                await exit_stack.aclose()
-        except Exception as e:
-            logger.error(f"Error getting tools from {server_name}: {e}")
-    
-    return tools_by_server
+    """Get all available tools from connected servers"""
+    return manager.get_all_tools()
 
 def format_tools_for_claude(tools_by_server: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
     """Format MCP tools for Claude API"""
@@ -422,9 +592,9 @@ async def get_anthropic_response_stream_with_mcp(
                         logger.info(tool_info.strip())
                         yield tool_info
                         
-                        # Call tool with fresh connection
+                        # Call tool with persistent connection
                         logger.info(f"Calling tool with arguments: {content.input}")
-                        result = await call_mcp_tool_with_new_connection(
+                        result = await call_mcp_tool_with_persistent_connection(
                             manager, 
                             server_name, 
                             tool_name, 
@@ -574,17 +744,29 @@ if 'mcp_connection_manager' not in st.session_state:
 def cleanup_connections():
     """Cleanup all MCP connections on app shutdown"""
     manager = st.session_state.get('mcp_connection_manager')
-    if manager and hasattr(manager, 'configs'):
-        # Synchronous cleanup for atexit
-        for server_name in list(manager.configs.keys()):
-            manager.configs.pop(server_name, None)
+    if manager:
+        # Run cleanup in a new event loop since we might not have one
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(manager.disconnect_all())
+            loop.close()
+            logger.info("All MCP connections cleaned up")
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
 
 # Register cleanup handler
 import atexit
 atexit.register(cleanup_connections)
 
 # --- UI Rendering ---
-st.title("🔧 MCP Multimodal Chatbot")
+# Get connected servers count for title
+manager = st.session_state.get('mcp_connection_manager')
+connected_count = len(manager.get_connected_servers()) if manager else 0
+if connected_count > 0:
+    st.title(f"🔧 MCP Multimodal Chatbot ({connected_count} servers)")
+else:
+    st.title("🔧 MCP Multimodal Chatbot")
 st.caption(f"Model: {MODEL_NAME} | Supports text, images, PDFs, and MCP tools")
 
 # Stop button placeholder
@@ -929,7 +1111,17 @@ with st.sidebar:
                 
                 # Hide confirmation and show success
                 st.session_state['show_reset_confirm'] = False
-                st.success("Chat history cleared! MCP servers preserved.")
+                
+                # Show what was preserved
+                manager = st.session_state.get('mcp_connection_manager')
+                if manager:
+                    connected_count = len(manager.get_connected_servers())
+                    if connected_count > 0:
+                        st.success(f"Chat cleared! {connected_count} MCP servers remain connected.")
+                    else:
+                        st.success("Chat cleared! (No MCP servers were connected)")
+                else:
+                    st.success("Chat cleared!")
                 st.rerun()
     
     # Cancel confirmation if it's showing
@@ -943,6 +1135,51 @@ with st.sidebar:
     # MCP Configuration
     st.header("🔧 MCP Configuration")
     
+    # Connection Status Summary
+    manager = st.session_state.get('mcp_connection_manager')
+    if manager:
+        connected_servers = manager.get_connected_servers()
+        if connected_servers:
+            col_status, col_health = st.columns([3, 1])
+            with col_status:
+                st.subheader("📡 Connected Servers")
+            with col_health:
+                if st.button("🔍 Check Health", help="Check if all connections are healthy"):
+                    with st.spinner("Checking connections..."):
+                        health_results = run_async(check_all_connections_health(manager))
+                        for server_name, is_healthy in health_results.items():
+                            if is_healthy:
+                                st.success(f"✅ {server_name}: Healthy")
+                            else:
+                                st.error(f"❌ {server_name}: Unhealthy")
+                                # Try to reconnect unhealthy servers
+                                config = manager.get_config(server_name)
+                                if config:
+                                    with st.spinner(f"Reconnecting {server_name}..."):
+                                        success = run_async(manager.connect_server(server_name))
+                                        if success:
+                                            st.success(f"🔄 {server_name}: Reconnected")
+                                        else:
+                                            st.error(f"💥 {server_name}: Failed to reconnect")
+            
+            total_tools = 0
+            for server_name in connected_servers:
+                connection_info = manager.get_connection(server_name)
+                if connection_info:
+                    _, _, tools = connection_info
+                    tool_count = len(tools)
+                    total_tools += tool_count
+                    
+                    # Show tool details
+                    tool_names = [tool.name if hasattr(tool, 'name') else str(tool) for tool in tools]
+                    st.caption(f"🖥️ **{server_name}**: {tool_count} tools - {', '.join(tool_names)}")
+            
+            st.info(f"**Total: {len(connected_servers)} servers, {total_tools} tools available**")
+        else:
+            st.warning("No servers currently connected")
+    
+    st.markdown("---")
+
     # JSON input for MCP servers
     st.subheader("Add MCP Servers")
     st.caption("Enter JSON configuration for MCP servers")
@@ -1044,13 +1281,15 @@ with st.sidebar:
                 
                 # Show connection status
                 manager = st.session_state.get('mcp_connection_manager')
-                if manager and config.name in manager.configs:
+                if manager and manager.is_connected(config.name):
                     if config.enabled:
-                        st.success("✅ Enabled (connections created on demand)")
+                        st.success("✅ Connected")
                     else:
-                        st.warning("⏸️ Disabled")
+                        st.warning("⚠️ Connected but disabled")
+                elif config.enabled:
+                    st.error("❌ Not connected")
                 else:
-                    st.info("⭕ Not configured")
+                    st.info("⏸️ Disabled")
                 
                 # Show configuration
                 st.caption(f"Command: `{config.command}`")
@@ -1067,33 +1306,54 @@ with st.sidebar:
             manager = MCPConnectionManager()
             st.session_state.mcp_connection_manager = manager
         
-        # Process disconnections
-        for server_name in st.session_state['mcp_pending_disconnections']:
-            manager.remove_config(server_name)
-            # Remove from the display list
-            if server_name in st.session_state['mcp_connections']:
-                del st.session_state['mcp_connections'][server_name]
-        
-        # Process new connections and auto-connect enabled servers
-        servers_to_add = []
-        
-        # Add pending connections
-        for config in st.session_state['mcp_pending_connections']:
-            servers_to_add.append(config)
-        
-        # Add auto-connect servers
-        for config in st.session_state['mcp_server_configs']:
-            if config.enabled and config.name not in [s.name for s in servers_to_add]:
-                servers_to_add.append(config)
-        
-        # Add servers to manager
-        for config in servers_to_add:
-            manager.add_config(config.name, config)
-            # Update display state
-            st.session_state['mcp_connections'][config.name] = {
-                'config': config,
-                'status': 'managed'
-            }
+        # Show progress
+        with st.spinner("Applying changes..."):
+            # Process disconnections first
+            servers_to_disconnect = []
+            for server_name in st.session_state['mcp_pending_disconnections']:
+                if manager.is_connected(server_name):
+                    servers_to_disconnect.append(server_name)
+                manager.remove_config(server_name)
+                # Remove from the display list
+                if server_name in st.session_state['mcp_connections']:
+                    del st.session_state['mcp_connections'][server_name]
+            
+            # Disconnect servers
+            if servers_to_disconnect:
+                run_async(disconnect_mcp_servers(manager, servers_to_disconnect))
+                st.success(f"Disconnected from {len(servers_to_disconnect)} servers")
+            
+            # Process new connections and auto-connect enabled servers
+            servers_to_connect = []
+            
+            # Add pending connections
+            for config in st.session_state['mcp_pending_connections']:
+                servers_to_connect.append(config)
+            
+            # Add auto-connect servers (enabled servers not yet connected)
+            for config in st.session_state['mcp_server_configs']:
+                if config.enabled and not manager.is_connected(config.name):
+                    if config.name not in [s.name for s in servers_to_connect]:
+                        servers_to_connect.append(config)
+            
+            # Add server configs to manager
+            for config in servers_to_connect:
+                manager.add_config(config.name, config)
+            
+            # Connect to servers
+            if servers_to_connect:
+                connection_results = run_async(connect_mcp_servers(manager, servers_to_connect))
+                
+                # Update display state based on connection results
+                for config in servers_to_connect:
+                    if connection_results.get(config.name, False):
+                        st.session_state['mcp_connections'][config.name] = {
+                            'config': config,
+                            'status': 'connected'
+                        }
+                        st.success(f"✅ Connected to {config.name}")
+                    else:
+                        st.error(f"❌ Failed to connect to {config.name}")
         
         # Clear pending lists
         st.session_state['mcp_pending_connections'] = []
