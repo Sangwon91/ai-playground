@@ -12,6 +12,7 @@ import logging
 import sys
 from concurrent.futures import ThreadPoolExecutor
 import queue
+import functools
 
 # Configure logging
 logging.basicConfig(
@@ -260,6 +261,21 @@ class MCPConnectionManager:
         with self.lock:
             return list(self.connections.keys())
 
+    async def test_connection_simple(self, server_name: str) -> bool:
+        """Simple connection test using list_tools"""
+        connection_info = self.get_connection(server_name)
+        if not connection_info:
+            return False
+        
+        session, exit_stack, tools = connection_info
+        try:
+            # Simple test - just list tools with short timeout
+            await asyncio.wait_for(session.list_tools(), timeout=3.0)
+            return True
+        except Exception as e:
+            logger.warning(f"Simple connection test failed for {server_name}: {e}")
+            return False
+
 # --- Page Configuration ---
 st.set_page_config(
     page_title=f"MCP Multimodal Chatbot - {MODEL_NAME}", 
@@ -325,6 +341,34 @@ async def check_all_connections_health(manager: MCPConnectionManager) -> Dict[st
         health_status[server_name] = await manager.check_connection_health(server_name)
     return health_status
 
+def run_in_thread_pool(func, *args, **kwargs):
+    """Run async function in a separate thread pool to avoid event loop conflicts"""
+    def sync_wrapper():
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(func(*args, **kwargs))
+        finally:
+            loop.close()
+    
+    # Use ThreadPoolExecutor to run in separate thread
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(sync_wrapper)
+        return future.result(timeout=120)  # 2 minute total timeout
+
+async def call_mcp_tool_in_new_loop(session, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    """Call MCP tool in a fresh event loop"""
+    try:
+        result = await asyncio.wait_for(
+            session.call_tool(tool_name, arguments),
+            timeout=30.0
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Tool call failed in new loop: {e}")
+        raise
+
 # --- MCP Functions ---
 async def call_mcp_tool_with_persistent_connection(manager: MCPConnectionManager, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> Any:
     """Call a tool on an MCP server using persistent connection"""
@@ -347,68 +391,25 @@ async def call_mcp_tool_with_persistent_connection(manager: MCPConnectionManager
         return error_msg
     
     try:
-        # Check if session is still active by testing a simple operation
-        logger.info(f"Validating connection to {server_name}")
+        # Test connection first
+        logger.info(f"Testing connection to {server_name}")
+        connection_ok = await manager.test_connection_simple(server_name)
+        if not connection_ok:
+            logger.warning(f"Connection test failed for {server_name}")
+            return f"Connection to server '{server_name}' is not responding"
         
-        # Call the tool with increased timeout
-        logger.info(f"Executing tool call: {tool_name} with args: {arguments}")
-        
-        # Increase timeout to 60 seconds for potentially slow operations
-        result = await asyncio.wait_for(
-            session.call_tool(tool_name, arguments),
-            timeout=60.0
-        )
-        
-        # Extract content from result
-        if hasattr(result, 'content') and result.content:
-            content_list = result.content
-            text_parts = []
-            for content_item in content_list:
-                if hasattr(content_item, 'type') and content_item.type == 'text':
-                    if hasattr(content_item, 'text'):
-                        text_parts.append(content_item.text)
-                elif hasattr(content_item, '__dict__'):
-                    item_dict = content_item.__dict__
-                    if item_dict.get('type') == 'text':
-                        text_parts.append(item_dict.get('text', ''))
+        # Use the sync wrapper which handles thread pool execution
+        logger.info(f"Calling sync wrapper for tool: {tool_name}")
+        result = call_tool_sync(manager, server_name, tool_name, arguments)
+        logger.info(f"Tool call completed: {result[:100] if isinstance(result, str) else str(result)[:100]}...")
+        return result
             
-            if text_parts:
-                final_result = '\n'.join(text_parts)
-                logger.info(f"Tool call successful: {final_result[:100]}...")
-                return final_result
-            else:
-                # If no text content, return the raw result
-                result_str = str(result)
-                logger.info(f"Tool call returned non-text result: {result_str[:100]}...")
-                return result_str
-        else:
-            # No content attribute or empty content
-            result_str = str(result)
-            logger.info(f"Tool call returned result without content: {result_str[:100]}...")
-            return result_str
-            
-    except asyncio.TimeoutError:
-        error_msg = f"Timeout calling tool '{tool_name}' on server '{server_name}' (exceeded 60 seconds)"
-        logger.error(error_msg)
-        
-        # Try to reconnect the server for next time
-        logger.info(f"Attempting to reconnect {server_name} due to timeout...")
-        try:
-            await manager.disconnect_server(server_name)
-            config = manager.get_config(server_name)
-            if config:
-                await manager.connect_server(server_name)
-                logger.info(f"Successfully reconnected to {server_name}")
-        except Exception as reconnect_error:
-            logger.error(f"Failed to reconnect to {server_name}: {reconnect_error}")
-        
-        return error_msg
     except Exception as e:
         error_msg = f"Error calling tool '{tool_name}' on server '{server_name}': {str(e)}"
         logger.error(error_msg, exc_info=True)
         
         # Check if it's a connection issue and try to reconnect
-        if "connection" in str(e).lower() or "closed" in str(e).lower():
+        if "connection" in str(e).lower() or "closed" in str(e).lower() or "timeout" in str(e).lower():
             logger.info(f"Detected connection issue with {server_name}, attempting to reconnect...")
             try:
                 await manager.disconnect_server(server_name)
@@ -417,34 +418,9 @@ async def call_mcp_tool_with_persistent_connection(manager: MCPConnectionManager
                     reconnect_success = await manager.connect_server(server_name)
                     if reconnect_success:
                         logger.info(f"Successfully reconnected to {server_name}")
-                        # Get the new session after reconnection
-                        new_connection_info = manager.get_connection(server_name)
-                        if new_connection_info:
-                            new_session, _, _ = new_connection_info
-                            # Retry the tool call once with new session
-                            logger.info(f"Retrying tool call: {tool_name}")
-                            retry_result = await asyncio.wait_for(
-                                new_session.call_tool(tool_name, arguments),
-                                timeout=60.0
-                            )
-                            
-                            # Process retry result same way as original
-                            if hasattr(retry_result, 'content') and retry_result.content:
-                                content_list = retry_result.content
-                                text_parts = []
-                                for content_item in content_list:
-                                    if hasattr(content_item, 'type') and content_item.type == 'text':
-                                        if hasattr(content_item, 'text'):
-                                            text_parts.append(content_item.text)
-                                
-                                if text_parts:
-                                    final_result = '\n'.join(text_parts)
-                                    logger.info(f"Retry successful: {final_result[:100]}...")
-                                    return final_result
-                            
-                            return str(retry_result)
+                        return f"Connection issue detected. Server '{server_name}' has been reconnected. Please try again."
             except Exception as reconnect_error:
-                logger.error(f"Failed to reconnect and retry: {reconnect_error}")
+                logger.error(f"Failed to reconnect to {server_name}: {reconnect_error}")
         
         return error_msg
 
@@ -594,12 +570,22 @@ async def get_anthropic_response_stream_with_mcp(
                         
                         # Call tool with persistent connection
                         logger.info(f"Calling tool with arguments: {content.input}")
-                        result = await call_mcp_tool_with_persistent_connection(
-                            manager, 
-                            server_name, 
-                            tool_name, 
-                            content.input
-                        )
+                        
+                        # Use executor to run the sync thread pool function
+                        loop = asyncio.get_event_loop()
+                        try:
+                            result = await loop.run_in_executor(
+                                None,  # Use default executor
+                                call_tool_sync,
+                                manager,
+                                server_name,
+                                tool_name,
+                                content.input
+                            )
+                        except Exception as tool_call_error:
+                            logger.error(f"Tool call failed: {tool_call_error}")
+                            result = f"Error calling tool: {str(tool_call_error)}"
+                        
                         logger.info(f"Tool result: {result}")
                         
                         # Display tool result in UI
@@ -1146,7 +1132,7 @@ with st.sidebar:
             with col_health:
                 if st.button("🔍 Check Health", help="Check if all connections are healthy"):
                     with st.spinner("Checking connections..."):
-                        health_results = run_async(check_all_connections_health(manager))
+                        health_results = run_in_thread_pool(check_all_connections_health, manager)
                         for server_name, is_healthy in health_results.items():
                             if is_healthy:
                                 st.success(f"✅ {server_name}: Healthy")
@@ -1156,7 +1142,7 @@ with st.sidebar:
                                 config = manager.get_config(server_name)
                                 if config:
                                     with st.spinner(f"Reconnecting {server_name}..."):
-                                        success = run_async(manager.connect_server(server_name))
+                                        success = run_in_thread_pool(manager.connect_server, server_name)
                                         if success:
                                             st.success(f"🔄 {server_name}: Reconnected")
                                         else:
@@ -1320,7 +1306,7 @@ with st.sidebar:
             
             # Disconnect servers
             if servers_to_disconnect:
-                run_async(disconnect_mcp_servers(manager, servers_to_disconnect))
+                run_in_thread_pool(disconnect_mcp_servers, manager, servers_to_disconnect)
                 st.success(f"Disconnected from {len(servers_to_disconnect)} servers")
             
             # Process new connections and auto-connect enabled servers
@@ -1342,7 +1328,7 @@ with st.sidebar:
             
             # Connect to servers
             if servers_to_connect:
-                connection_results = run_async(connect_mcp_servers(manager, servers_to_connect))
+                connection_results = run_in_thread_pool(connect_mcp_servers, manager, servers_to_connect)
                 
                 # Update display state based on connection results
                 for config in servers_to_connect:
@@ -1363,4 +1349,40 @@ with st.sidebar:
 
 # Reset prompt submission flag
 if not st.session_state.get("prompt_submitted_this_run", False) and not prompt:
-    st.session_state['prompt_submitted_this_run'] = False 
+    st.session_state['prompt_submitted_this_run'] = False
+
+def call_tool_sync(manager: MCPConnectionManager, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> str:
+    """Synchronous wrapper for tool calling using thread pool"""
+    try:
+        # Get connection info
+        connection_info = manager.get_connection(server_name)
+        if not connection_info:
+            return f"No active connection to server '{server_name}'"
+        
+        session, exit_stack, tools = connection_info
+        
+        # Call tool in thread pool
+        result = run_in_thread_pool(call_mcp_tool_in_new_loop, session, tool_name, arguments)
+        
+        # Extract content from result
+        if hasattr(result, 'content') and result.content:
+            content_list = result.content
+            text_parts = []
+            for content_item in content_list:
+                if hasattr(content_item, 'type') and content_item.type == 'text':
+                    if hasattr(content_item, 'text'):
+                        text_parts.append(content_item.text)
+                elif hasattr(content_item, '__dict__'):
+                    item_dict = content_item.__dict__
+                    if item_dict.get('type') == 'text':
+                        text_parts.append(item_dict.get('text', ''))
+            
+            if text_parts:
+                return '\n'.join(text_parts)
+            else:
+                return str(result)
+        else:
+            return str(result)
+    except Exception as e:
+        logger.error(f"Sync tool call failed: {e}")
+        return f"Error calling tool: {str(e)}" 
