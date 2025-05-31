@@ -1376,6 +1376,24 @@ with st.sidebar:
         "@modelcontextprotocol/server-sequential-thinking"
     ],
     "enabled": true
+},
+ {
+    "name": "filesystem",
+    "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/xlsw91/Test"
+      ]
+ },
+{
+    "name": "memory",
+    "command": "npx",
+    "args": [
+    "-y",
+    "@modelcontextprotocol/server-memory"
+    ],
+    "enabled": true
 }
 ]"""
 
