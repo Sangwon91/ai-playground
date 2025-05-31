@@ -81,6 +81,24 @@ uv run streamlit run scripts/multimodal/streamlit-multimodal-chatbot.py --server
         "OPENAPI_MCP_HEADERS": "{\"Authorization\": \"Bearer ntn_***\", \"Notion-Version\": \"2022-06-28\" }"
       },
         "enabled": true
+    },
+    {
+       "name":  "playwright",
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ]
+    },
+    {
+      "name": "chroma",
+      "command": "uvx",
+      "args": [
+          "chroma-mcp",
+          "--client-type",
+          "persistent",
+          "--data-dir",
+          "/Users/lsw91/Test"
+      ]
     }
 ]
 ```
