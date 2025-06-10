@@ -61,7 +61,7 @@ uv run streamlit run scripts/multimodal/streamlit-multimodal-chatbot.py --server
       "args": [
         "-y",
         "@modelcontextprotocol/server-filesystem",
-        "/home/lsw91/Downloads"
+        "/home/lsw91/ai-data-storage"
       ]
  },
     {
@@ -72,6 +72,17 @@ uv run streamlit run scripts/multimodal/streamlit-multimodal-chatbot.py --server
         "@modelcontextprotocol/server-memory"
       ],
         "enabled": true
+    },
+    {
+      "name": "chroma",
+      "command": "uvx",
+      "args": [
+          "chroma-mcp",
+          "--client-type",
+          "persistent",
+          "--data-dir",
+          "/home/lsw91/ai-data-storage"
+      ]
     },
     {
         "name": "notionApi",
@@ -87,17 +98,6 @@ uv run streamlit run scripts/multimodal/streamlit-multimodal-chatbot.py --server
       "command": "npx",
       "args": [
         "@playwright/mcp@latest"
-      ]
-    },
-    {
-      "name": "chroma",
-      "command": "uvx",
-      "args": [
-          "chroma-mcp",
-          "--client-type",
-          "persistent",
-          "--data-dir",
-          "/Users/lsw91/Test"
       ]
     }
 ]
