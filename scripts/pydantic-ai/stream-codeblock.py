@@ -23,10 +23,10 @@ agent = Agent()
 
 # models to try, and the appropriate env var
 models: list[tuple[KnownModelName, str]] = [
-    # ('google-gla:gemini-1.5-flash', 'GEMINI_API_KEY'),
+    ('google-gla:gemini-2.5-flash', 'GEMINI_API_KEY'),
     # ('openai:gpt-4o-mini', 'OPENAI_API_KEY'),
     # ('groq:llama-3.3-70b-versatile', 'GROQ_API_KEY'),
-    ('anthropic:claude-3-5-sonnet-latest', 'ANTHROPIC_API_KEY'),
+    # ('anthropic:claude-3-5-sonnet-latest', 'ANTHROPIC_API_KEY'),
 ]
 
 
