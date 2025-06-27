@@ -132,6 +132,9 @@ function addMessages(responseText: string) {
         `
       }
       convElement?.appendChild(msgDiv)
+      // 말풍선 내부 .prose에 대해 수식 랜더링 적용
+      const prose = msgDiv.querySelector('.prose')
+      if (prose) renderMathWithRetry(prose as HTMLElement)
     }
   }
   window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })
