@@ -20,6 +20,7 @@ from fastapi import Depends, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from typing_extensions import LiteralString, ParamSpec, TypedDict
 import uuid
+from fastapi.staticfiles import StaticFiles
 
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UnexpectedModelBehavior
@@ -55,15 +56,15 @@ app = fastapi.FastAPI(lifespan=lifespan)
 logfire.instrument_fastapi(app)
 
 
+# 정적 파일 서빙 (static 디렉토리)
+STATIC_DIR = THIS_DIR / "static"
+STATIC_DIR.mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
 @app.get('/')
 async def index() -> FileResponse:
     return FileResponse((THIS_DIR / 'chat_app.html'), media_type='text/html')
-
-
-@app.get('/chat_app.ts')
-async def main_ts() -> FileResponse:
-    """Get the raw typescript code, it's compiled in the browser, forgive me."""
-    return FileResponse((THIS_DIR / 'chat_app.ts'), media_type='text/plain')
 
 
 async def get_db(request: Request) -> Database:

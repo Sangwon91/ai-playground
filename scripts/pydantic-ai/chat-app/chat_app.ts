@@ -1,0 +1,1 @@
+// 이 파일은 더 이상 사용하지 않습니다. 코드가 main.js, api.js, state.js, ui.js, math.js로 분할되었습니다.
