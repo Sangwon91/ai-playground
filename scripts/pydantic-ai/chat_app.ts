@@ -65,23 +65,23 @@ if (newSessionBtn) {
 // stream the response and render messages as each chunk is received
 // data is sent as newline-delimited JSON
 async function onFetchResponse(response: Response): Promise<void> {
-  let text = ''
   let decoder = new TextDecoder()
+  let buffer = ''
   if (response.ok) {
     const reader = response.body?.getReader()
-    if (!reader) {
-      throw new Error('No reader')
-    }
+    if (!reader) throw new Error('No reader')
     while (true) {
       const {done, value} = await reader.read()
-      if (done) {
-        break
+      if (done) break
+      buffer += decoder.decode(value)
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (line.trim().length > 0) addMessages(line)
       }
-      text += decoder.decode(value)
-      addMessages(text)
       spinner?.classList.remove('active')
     }
-    addMessages(text)
+    if (buffer.trim().length > 0) addMessages(buffer)
     promptInput.disabled = false
     promptInput.focus()
   } else {
