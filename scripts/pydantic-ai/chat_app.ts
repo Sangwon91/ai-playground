@@ -17,6 +17,7 @@ function setSession(sessionId: string) {
   if (currentSessionSpan) currentSessionSpan.textContent = sessionId
   clearConversation()
   loadMessages()
+  loadSessions()
 }
 
 function clearConversation() {
