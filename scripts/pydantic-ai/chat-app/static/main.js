@@ -1,4 +1,4 @@
-import { fetchSessions, createSession, fetchMessages, sendMessage } from './api.js';
+import { fetchSessions, createSession, fetchMessages } from './api.js';
 import { getCurrentSession, setCurrentSession } from './state.js';
 import { renderSessionList, renderMessages, showSpinner, showError, clearConversation, setCurrentSessionUI } from './ui.js';
 
@@ -39,8 +39,31 @@ async function handleFormSubmit(e) {
   promptInput.value = '';
   promptInput.disabled = true;
   try {
-    await sendMessage(getCurrentSession(), prompt);
-    await loadAndRenderMessages();
+    // StreamingResponse를 직접 읽어서 실시간 렌더링
+    const body = new FormData();
+    body.append('session_id', getCurrentSession());
+    body.append('prompt', prompt);
+    const response = await fetch('/chat/', { method: 'POST', body });
+    if (!response.body) throw new Error('No response body');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    clearConversation();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (line.trim().length > 0) {
+          renderMessages([JSON.parse(line)]); // 한 줄씩 렌더링
+        }
+      }
+    }
+    if (buffer.trim().length > 0) {
+      renderMessages([JSON.parse(buffer)]);
+    }
     await loadAndRenderSessions();
   } catch (e) {
     showError('메시지 전송 실패');
