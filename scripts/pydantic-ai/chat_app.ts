@@ -110,33 +110,29 @@ function addMessages(responseText: string) {
     const {timestamp, role, content} = message
     const id = `msg-${timestamp}`
     let msgDiv = document.getElementById(id)
+    const bubble =
+      role === 'user'
+        ? `<div class="max-w-[70%] rounded-xl rounded-bl-none bg-muted text-foreground p-4 shadow border" style="background: var(--muted); color: var(--foreground); border-color: var(--border);">
+            <div class="text-xs mb-1 text-muted-foreground">You</div>
+            <div class="prose break-words">${marked.parse(content)}</div>
+          </div>`
+        : `<div class="max-w-[70%] rounded-xl rounded-br-none bg-primary text-primary-foreground p-4 shadow border" style="background: var(--primary); color: var(--primary-foreground); border-color: var(--primary);">
+            <div class="text-xs mb-1 text-primary-foreground/80">AI</div>
+            <div class="prose break-words">${marked.parse(content)}</div>
+          </div>`
     if (!msgDiv) {
       msgDiv = document.createElement('div')
       msgDiv.id = id
       msgDiv.title = `${role} at ${timestamp}`
       msgDiv.classList.add('flex', 'w-full', 'mb-2')
-      if (role === 'user') {
-        msgDiv.classList.add('justify-start')
-        msgDiv.innerHTML = `
-          <div class="max-w-[70%] rounded-xl rounded-bl-none bg-muted text-foreground p-4 shadow border" style="background: var(--muted); color: var(--foreground); border-color: var(--border);">
-            <div class="text-xs mb-1 text-muted-foreground">You</div>
-            <div class="prose break-words">${marked.parse(content)}</div>
-          </div>
-        `
-      } else {
-        msgDiv.classList.add('justify-end')
-        msgDiv.innerHTML = `
-          <div class="max-w-[70%] rounded-xl rounded-br-none bg-primary text-primary-foreground p-4 shadow border" style="background: var(--primary); color: var(--primary-foreground); border-color: var(--primary);">
-            <div class="text-xs mb-1 text-primary-foreground/80">AI</div>
-            <div class="prose break-words">${marked.parse(content)}</div>
-          </div>
-        `
-      }
+      msgDiv.classList.add(role === 'user' ? 'justify-start' : 'justify-end')
       convElement?.appendChild(msgDiv)
-      // 말풍선 내부 .prose에 대해 수식 랜더링 적용
-      const prose = msgDiv.querySelector('.prose')
-      if (prose) renderMathWithRetry(prose as HTMLElement)
     }
+    // 항상 최신 내용으로 갱신
+    msgDiv.innerHTML = bubble
+    // 수식 랜더링
+    const prose = msgDiv.querySelector('.prose')
+    if (prose) renderMathWithRetry(prose as HTMLElement)
   }
   window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })
 }
