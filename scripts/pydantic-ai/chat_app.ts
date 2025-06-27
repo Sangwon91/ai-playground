@@ -7,6 +7,54 @@ const convElement = document.getElementById('conversation')
 const promptInput = document.getElementById('prompt-input') as HTMLInputElement
 const spinner = document.getElementById('spinner')
 
+let currentSessionId = 'default'
+const currentSessionSpan = document.getElementById('current-session') as HTMLSpanElement
+const sessionList = document.getElementById('session-list') as HTMLUListElement
+const newSessionBtn = document.getElementById('new-session-btn') as HTMLButtonElement
+
+function setSession(sessionId: string) {
+  currentSessionId = sessionId
+  if (currentSessionSpan) currentSessionSpan.textContent = sessionId
+  clearConversation()
+  loadMessages()
+}
+
+function clearConversation() {
+  if (convElement) convElement.innerHTML = ''
+}
+
+async function loadMessages() {
+  try {
+    const response = await fetch(`/chat/?session_id=${encodeURIComponent(currentSessionId)}`)
+    await onFetchResponse(response)
+  } catch (e) {
+    onError(e)
+  }
+}
+
+async function loadSessions() {
+  const res = await fetch('/sessions/')
+  const sessions = await res.json()
+  sessionList.innerHTML = ''
+  for (const s of sessions) {
+    const li = document.createElement('li')
+    li.className = 'list-group-item list-group-item-action'
+    li.style.cursor = 'pointer'
+    li.textContent = `${s.session_id} (${s.last_time ? s.last_time.slice(0,19).replace('T',' ') : ''})\n${s.last_message ? s.last_message.slice(0, 40) : ''}`
+    li.onclick = () => setSession(s.session_id)
+    sessionList.appendChild(li)
+  }
+}
+
+if (newSessionBtn) {
+  newSessionBtn.onclick = async () => {
+    const res = await fetch('/session/', {method: 'POST'})
+    const data = await res.json()
+    setSession(data.session_id)
+    await loadSessions()
+  }
+}
+
 // stream the response and render messages as each chunk is received
 // data is sent as newline-delimited JSON
 async function onFetchResponse(response: Response): Promise<void> {
@@ -88,23 +136,24 @@ function onError(error: any) {
   document.getElementById('spinner')?.classList.remove('active')
 }
 
+// 메시지 전송 시 session_id 포함
 async function onSubmit(e: SubmitEvent): Promise<void> {
   e.preventDefault()
   spinner?.classList.add('active')
   const body = new FormData(e.target as HTMLFormElement)
-
+  body.append('session_id', currentSessionId)
   promptInput.value = ''
   promptInput.disabled = true
-
   const response = await fetch('/chat/', {method: 'POST', body})
   await onFetchResponse(response)
+  await loadSessions()
 }
 
-// call onSubmit when the form is submitted (e.g. user clicks the send button or hits Enter)
 document.querySelector('form')?.addEventListener('submit', (e) => onSubmit(e).catch(onError))
 
-// load messages on page load
-fetch('/chat/').then(onFetchResponse).catch(onError)
+// 페이지 로드 시
+setSession('default')
+loadSessions()
 
 declare global {
   interface Window {
