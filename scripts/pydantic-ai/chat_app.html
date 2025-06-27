@@ -4,71 +4,56 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Chat App</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
   <style>
-    main {
-      max-width: 700px;
-    }
-    #conversation .user::before {
-      content: 'You asked: ';
-      font-weight: bold;
-      display: block;
-    }
-    #conversation .model::before {
-      content: 'AI Response: ';
-      font-weight: bold;
-      display: block;
-    }
-    #spinner {
-      opacity: 0;
-      transition: opacity 500ms ease-in;
-      width: 30px;
-      height: 30px;
-      border: 3px solid #222;
-      border-bottom-color: transparent;
-      border-radius: 50%;
-      animation: rotation 1s linear infinite;
-    }
-    @keyframes rotation {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
-    #spinner.active {
-      opacity: 1;
+    :root {
+      --radius: 0.625rem;
+      --background: oklch(1 0 0);
+      --foreground: oklch(0.145 0 0);
+      --card: oklch(1 0 0);
+      --card-foreground: oklch(0.145 0 0);
+      --popover: oklch(1 0 0);
+      --popover-foreground: oklch(0.145 0 0);
+      --primary: oklch(0.205 0 0);
+      --primary-foreground: oklch(0.985 0 0);
+      --secondary: oklch(0.97 0 0);
+      --secondary-foreground: oklch(0.205 0 0);
+      --muted: oklch(0.97 0 0);
+      --muted-foreground: oklch(0.556 0 0);
+      --accent: oklch(0.97 0 0);
+      --accent-foreground: oklch(0.205 0 0);
+      --destructive: oklch(0.577 0.245 27.325);
+      --border: oklch(0.922 0 0);
+      --input: oklch(0.922 0 0);
+      --ring: oklch(0.708 0 0);
     }
   </style>
 </head>
-<body>
-  <main class="border rounded mx-auto my-5 p-4">
-    <h1>Chat App</h1>
-    <div class="d-flex justify-content-between align-items-center mb-2">
-      <div>
-        <button id="new-session-btn" class="btn btn-outline-secondary btn-sm">새 대화</button>
-        <span class="ms-2">현재 대화: <span id="current-session">default</span></span>
-      </div>
+<body class="bg-background text-foreground min-h-screen" style="background: var(--background); color: var(--foreground);">
+  <main class="max-w-2xl mx-auto my-10 p-8 rounded-xl border bg-card shadow" style="background: var(--card); color: var(--card-foreground); border-color: var(--border);">
+    <h1 class="text-2xl font-bold mb-6">Chat App</h1>
+    <div class="flex items-center justify-between mb-6">
+      <button id="new-session-btn" class="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2" style="background: var(--primary); color: var(--primary-foreground);">새 대화</button>
+      <span class="text-xs" style="color: var(--muted-foreground);">현재 대화: <span id="current-session" class="font-mono px-2 py-1 rounded bg-muted text-xs" style="background: var(--muted); color: var(--muted-foreground);"></span></span>
     </div>
-    <div class="mb-3">
-      <strong>과거 대화 목록:</strong>
-      <ul id="session-list" class="list-group"></ul>
+    <div class="mb-6">
+      <div class="font-semibold text-sm mb-2">과거 대화 목록</div>
+      <ul id="session-list" class="space-y-2"></ul>
     </div>
-    <p>Ask me anything...</p>
-    <div id="conversation" class="px-2"></div>
-    <div class="d-flex justify-content-center mb-3">
-      <div id="spinner"></div>
-    </div>
-    <form method="post">
-      <input id="prompt-input" name="prompt" class="form-control"/>
-      <div class="d-flex justify-content-end">
-        <button class="btn btn-primary mt-2">Send</button>
-      </div>
+    <div id="conversation" class="space-y-4 min-h-[200px] mb-6"></div>
+    <form class="flex gap-2" method="post">
+      <input id="prompt-input" name="prompt" class="flex-1 flex h-10 rounded-md border bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2" style="background: var(--background); color: var(--foreground); border-color: var(--input);" autocomplete="off" />
+      <button class="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2" style="background: var(--primary); color: var(--primary-foreground);">Send</button>
     </form>
-    <div id="error" class="d-none text-danger">
+    <div class="flex justify-center mt-4">
+      <div id="spinner" class="hidden w-8 h-8 border-4 border-primary border-b-transparent rounded-full animate-spin" style="border-color: var(--primary); border-bottom-color: transparent;"></div>
+    </div>
+    <div id="error" class="hidden mt-2 text-center" style="color: var(--destructive);">
       Error occurred, check the browser developer console for more information.
     </div>
   </main>
 </body>
-</html>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/typescript/5.6.3/typescript.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
@@ -88,7 +73,7 @@
 
   loadTs().catch((e) => {
     console.error(e);
-    document.getElementById('error').classList.remove('d-none');
-    document.getElementById('spinner').classList.remove('active');
+    document.getElementById('error').classList.remove('hidden');
+    document.getElementById('spinner').classList.remove('hidden');
   });
 </script>
