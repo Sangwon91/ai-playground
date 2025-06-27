@@ -38,9 +38,15 @@ async function loadSessions() {
   sessionList.innerHTML = ''
   for (const s of sessions) {
     const li = document.createElement('li')
-    li.className = 'list-group-item list-group-item-action'
-    li.style.cursor = 'pointer'
-    li.textContent = `${s.session_id} (${s.last_time ? s.last_time.slice(0,19).replace('T',' ') : ''})\n${s.last_message ? s.last_message.slice(0, 40) : ''}`
+    li.className = `rounded-lg border bg-card px-4 py-2 shadow-sm cursor-pointer flex flex-col gap-1 transition \
+      ${s.session_id === currentSessionId ? 'ring-2 ring-primary bg-accent/40 border-primary font-bold' : 'hover:bg-accent/20'}`
+    li.style.background = s.session_id === currentSessionId ? 'var(--accent)' : 'var(--card)'
+    li.style.borderColor = s.session_id === currentSessionId ? 'var(--primary)' : 'var(--border)'
+    li.innerHTML = `
+      <div class="font-mono text-xs truncate" style="color: var(--muted-foreground);">${s.session_id}</div>
+      <div class="truncate text-sm">${s.last_message ? s.last_message.slice(0, 40) : ''}</div>
+      <div class="text-xs" style="color: var(--muted-foreground);">${s.last_time ? s.last_time.slice(0,19).replace('T',' ') : ''}</div>
+    `
     li.onclick = () => setSession(s.session_id)
     sessionList.appendChild(li)
   }
@@ -107,11 +113,26 @@ function addMessages(responseText: string) {
       msgDiv = document.createElement('div')
       msgDiv.id = id
       msgDiv.title = `${role} at ${timestamp}`
-      msgDiv.classList.add('border-top', 'pt-2', role)
+      msgDiv.classList.add('flex', 'w-full', 'mb-2')
+      if (role === 'user') {
+        msgDiv.classList.add('justify-start')
+        msgDiv.innerHTML = `
+          <div class="max-w-[70%] rounded-xl rounded-bl-none bg-muted text-foreground p-4 shadow border" style="background: var(--muted); color: var(--foreground); border-color: var(--border);">
+            <div class="text-xs mb-1 text-muted-foreground">You</div>
+            <div class="prose break-words">${marked.parse(content)}</div>
+          </div>
+        `
+      } else {
+        msgDiv.classList.add('justify-end')
+        msgDiv.innerHTML = `
+          <div class="max-w-[70%] rounded-xl rounded-br-none bg-primary text-primary-foreground p-4 shadow border" style="background: var(--primary); color: var(--primary-foreground); border-color: var(--primary);">
+            <div class="text-xs mb-1 text-primary-foreground/80">AI</div>
+            <div class="prose break-words">${marked.parse(content)}</div>
+          </div>
+        `
+      }
       convElement?.appendChild(msgDiv)
     }
-    msgDiv.innerHTML = marked.parse(content)
-    renderMathWithRetry(msgDiv)
   }
   window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })
 }

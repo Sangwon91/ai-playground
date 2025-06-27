@@ -31,18 +31,18 @@
   </style>
 </head>
 <body class="bg-background text-foreground min-h-screen" style="background: var(--background); color: var(--foreground);">
-  <main class="max-w-2xl mx-auto my-10 p-8 rounded-xl border bg-card shadow" style="background: var(--card); color: var(--card-foreground); border-color: var(--border);">
+  <aside class="fixed left-0 top-0 w-64 h-screen bg-card border-r border-border shadow-sm flex flex-col z-20" style="background: var(--card); border-color: var(--border);">
+    <div class="p-4 border-b border-border flex items-center justify-between">
+      <span class="font-bold text-lg">대화 목록</span>
+      <button id="new-session-btn" class="inline-flex items-center justify-center rounded-md bg-primary px-2 py-1 text-xs font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2" style="background: var(--primary); color: var(--primary-foreground);">새 대화</button>
+    </div>
+    <ul id="session-list" class="flex-1 overflow-y-auto p-2 space-y-2"></ul>
+  </aside>
+  <main class="ml-64 flex flex-col items-stretch max-w-3xl mx-auto my-10 p-8 rounded-xl border bg-card shadow min-h-screen relative" style="background: var(--card); color: var(--card-foreground); border-color: var(--border);">
     <h1 class="text-2xl font-bold mb-6">Chat App</h1>
-    <div class="flex items-center justify-between mb-6">
-      <button id="new-session-btn" class="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2" style="background: var(--primary); color: var(--primary-foreground);">새 대화</button>
-      <span class="text-xs" style="color: var(--muted-foreground);">현재 대화: <span id="current-session" class="font-mono px-2 py-1 rounded bg-muted text-xs" style="background: var(--muted); color: var(--muted-foreground);"></span></span>
-    </div>
-    <div class="mb-6">
-      <div class="font-semibold text-sm mb-2">과거 대화 목록</div>
-      <ul id="session-list" class="space-y-2"></ul>
-    </div>
-    <div id="conversation" class="space-y-4 min-h-[200px] mb-6"></div>
-    <form class="flex gap-2" method="post">
+    <div class="mb-2 text-xs" style="color: var(--muted-foreground);">현재 대화: <span id="current-session" class="font-mono px-2 py-1 rounded bg-muted text-xs" style="background: var(--muted); color: var(--muted-foreground);"></span></div>
+    <div id="conversation" class="space-y-4 flex-1 overflow-y-auto mb-4 pr-2"></div>
+    <form class="flex gap-2 sticky bottom-0 bg-card py-4" style="background: var(--card); z-index: 10;" method="post">
       <input id="prompt-input" name="prompt" class="flex-1 flex h-10 rounded-md border bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2" style="background: var(--background); color: var(--foreground); border-color: var(--input);" autocomplete="off" />
       <button class="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2" style="background: var(--primary); color: var(--primary-foreground);">Send</button>
     </form>
