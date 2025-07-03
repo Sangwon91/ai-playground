@@ -1,7 +1,7 @@
 import asyncio
 import os
 
-# import logfire
+import logfire
 from rich.console import Console, ConsoleOptions, RenderResult
 from rich.live import Live
 from rich.markdown import CodeBlock, Markdown
@@ -16,8 +16,8 @@ from pydantic_ai.models import KnownModelName
 
 dotenv.load_dotenv()
 # 'if-token-present' means nothing will be sent (and the example will work) if you don't have logfire configured
-# logfire.configure(send_to_logfire='if-token-present')
-# logfire.instrument_pydantic_ai()
+logfire.configure(send_to_logfire=os.getenv('LOGFIRE_TOKEN'))
+logfire.instrument_pydantic_ai()
 
 agent = Agent()
 
